@@ -1,0 +1,2091 @@
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/Library.lua"))()
+local Toggles = Library.Toggles
+local Options = Library.Options
+
+local Window = Library:CreateWindow({
+    Title = "Project Zero",
+    Footer = "project zero — hvh",
+    Center = true,
+    AutoShow = true,
+    Resizable = true,
+    MobileButtonsSide = "Left"
+})
+
+local function Notify(text, duration)
+    Library:Notify({ Title = "Project Zero", Description = text, Time = duration or 3 })
+end
+
+-- ---------------- AC bypass ----------------
+task.spawn(function()
+    local wrap = LPH_NO_VIRTUALIZE or function(f) return f end
+    pcall(wrap(function()
+        local bypassed = false
+
+        local kKickNames = {
+            "Kick",
+            "kick"
+        }
+
+        local kProtectedProperties = {
+            Enabled = true,
+            Disabled = false
+        }
+
+        local kSlotMap = {
+            [69]  = 2,
+            [138] = 3,
+            [207] = 4,
+            [276] = 5,
+            [345] = 6,
+            [414] = 7,
+        }
+
+        local kFilledSub = {
+            1,
+            2,
+            3,
+            4,
+            5
+        }
+
+        local Players = cloneref(game:GetService("Players"))
+        local ReplicatedFirst = cloneref(game:GetService("ReplicatedFirst"))
+        local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
+        local ScriptContext = cloneref(game:GetService("ScriptContext"))
+
+        local LocalPlayer = Players.LocalPlayer
+
+        local ac_script = ReplicatedFirst:WaitForChild("LocalScript3")
+        local ac_event = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("RemoteEvent")
+
+        local last = nil
+        local first_seen = false
+        local hijack_ready = false
+        local client_id
+        local expected_interval = 0.6
+        local min_interval = 0.25
+        local ema_alpha = 0.5
+        local samples = 0
+        local hidden_fn = {}
+        local max_stack_depth = 128
+        if not setstackhidden then
+            local function ValidTraceback(s)
+                local dotPos = string.find(s, "%.")
+                local colonPos = string.find(s, ":")
+
+                if not dotPos then
+                    return false
+                end
+
+                if not colonPos then
+                    return true
+                end
+
+                return dotPos < colonPos
+            end
+
+            local function TracebackLines(str, lvl)
+                local pos = lvl
+                return function()
+                    if not pos then
+                        return nil
+                    end
+                    local p1, p2 = string.find(str, "\r?\n", pos)
+                    local line
+                    if p1 then
+                        line = str:sub(pos, p1 - 1)
+                        pos = p2 + 1
+                    else
+                        line = str:sub(pos)
+                        pos = nil
+                    end
+                    return line
+                end
+            end
+
+            local old_dbg_traceback;
+            old_dbg_traceback = hookfunction(getrenv().debug.traceback, function(...)
+                if checkcaller() or not (pcall(old_dbg_traceback, ...)) then
+                    return old_dbg_traceback(...)
+                end
+
+                local StartingString, StackLevel = ...
+                local Traceback = old_dbg_traceback(...)
+                local NewTraceback = {}
+
+                if typeof(StartingString) == "string" or typeof(StartingString) == "number" then
+                    table.insert(NewTraceback, tostring(StartingString))
+                end
+
+                if typeof(StackLevel) ~= "number" or not tonumber(StackLevel) then
+                    StackLevel = 1
+                else
+                    StackLevel = math.floor(tonumber(StackLevel))
+                end
+
+                for Line in TracebackLines(Traceback, StackLevel) do
+                    if not ValidTraceback(Line) then
+                        continue
+                    end
+
+                    table.insert(NewTraceback, Line)
+                end
+
+                return table.concat(NewTraceback, "\n") .. "\n"
+            end)
+
+            local old_dbg_info;
+            old_dbg_info = hookfunction(getrenv().debug.info, function(...)
+                local ToInspect, LevelOrInfo, _ThreadInfo = ...
+
+                if
+                    checkcaller()
+                    or typeof(ToInspect) == "function"
+                    or typeof(ToInspect) == "thread"
+                    or not pcall(function(LevelOrInfo)
+                        old_dbg_info(function() end, LevelOrInfo)
+                    end, LevelOrInfo)
+                then
+                    return old_dbg_info(...)
+                end
+
+                ToInspect = math.floor(ToInspect)
+
+                local ReconstructedConstructedStack = {}
+                for Level = 2, max_stack_depth do
+                    local Function, Source, Line, Name, NumberOfArgs, Varargs = old_dbg_info(Level, "fslna")
+
+                    if not Function or not Source or not Line or not Name then
+                        break
+                    end
+
+                    if isexecutorclosure(Function) and not hidden_fn[Function] then
+                        continue
+                    end
+
+                    table.insert(ReconstructedConstructedStack, {
+                        f = Function,
+                        s = Source,
+                        l = Line,
+                        n = Name,
+                        a = { NumberOfArgs, Varargs },
+                    })
+                end
+
+                local InfoLevel = ReconstructedConstructedStack[ToInspect + 1]
+
+                if not InfoLevel then
+                    return old_dbg_info(3e4, LevelOrInfo)
+                end
+
+                local ReturnResult = {}
+                for idx, info in string.split(LevelOrInfo, "") do
+                    local Value = InfoLevel[info]
+
+                    if typeof(Value) == "table" then
+                        for _, v in Value do
+                            table.insert(ReturnResult, v)
+                        end
+
+                        continue
+                    end
+
+                    table.insert(ReturnResult, Value)
+                end
+
+                return table.unpack(ReturnResult, 1, #ReturnResult)
+            end)
+
+            local old_getfenv;
+            old_getfenv = hookfunction(getrenv().getfenv, function(...)
+                if checkcaller() then
+                    return old_getfenv(...)
+                end
+
+                local ToInspect = ...
+
+                local Success, ResultingEnv = pcall(function()
+                    if typeof(ToInspect) == "number" and ToInspect >= 0 then
+                        return old_getfenv(ToInspect + 3)
+                    end
+
+                    return old_getfenv(ToInspect)
+                end)
+
+                if not Success then
+                    if typeof(ToInspect) == "number" and ToInspect >= 0 then
+                        return old_getfenv(ToInspect + 3)
+                    end
+
+                    return old_getfenv(ToInspect)
+                end
+
+                if ToInspect == nil or typeof(ToInspect) == "function" then
+                    return ResultingEnv
+                end
+
+                ToInspect = math.floor(ToInspect)
+
+                local ReconstructedConstructedStack = {}
+                for Level = 1, max_stack_depth do
+                    local StackInfoSuccess, Data = pcall(function()
+                        return {
+                            Environement = old_getfenv(Level + 3),
+                            Function = old_dbg_info(Level + 3, "f"),
+                        }
+                    end)
+
+                    if not StackInfoSuccess or not Data then
+                        break
+                    end
+
+                    local Environement = Data.Environement
+                    local Function = Data.Function
+
+                    if typeof(Environement["getgenv"]) == "function" and isexecutorclosure(Environement["getgenv"]) then
+                        if shared.Hooking.IncludeInStackFunctions[Function] then
+                            Environement = setmetatable(ResultingEnv, {
+                                __index = getrenv()
+                            })
+                        else
+                            continue
+                        end
+                    end
+
+                    table.insert(ReconstructedConstructedStack, Environement)
+                end
+
+                local InfoLevel = ReconstructedConstructedStack[ToInspect + 1]
+
+                if not InfoLevel then
+                    return old_getfenv(3e4)
+                end
+
+                return InfoLevel
+            end)
+        end
+
+        setstackhidden = setstackhidden or function(fn_or_level, hidden)
+            assert(typeof(hidden) == "boolean", "hidden must be boolean")
+
+            local ok, fn = pcall(function()
+                if typeof(fn_or_level) == "number" then
+                    return debug.info(fn_or_level + 2, "f")
+                end
+                return fn_or_level
+            end)
+
+            assert(ok and fn, "invalid argument #1 to 'setstackhidden'")
+            hidden_fn[fn] = not hidden
+        end
+
+        local TrustedFunctions = setmetatable({}, {
+            __mode = "k"
+        })
+
+        local function TrustFunction(fn)
+            if type(fn) == "function" then
+                TrustedFunctions[fn] = true
+            end
+
+            return fn
+        end
+
+        local function IsTrustedFunction(fn)
+            return TrustedFunctions[fn] == true
+        end
+
+        local SafeHook = function(hookfn, ...)
+            local args = {...}
+            local func, inst, metamethod, detour
+
+            if hookfn == hookmetamethod then
+                inst = args[1]
+                metamethod = args[2]
+                detour = args[3]
+            else
+                func = args[1]
+                detour = args[2]
+            end
+
+            local original_func
+
+            if hookfn == hookfunction and iscclosure(func) then
+                detour = newcclosure(detour)
+            end
+
+            if not iscclosure(detour) then
+                detour = newcclosure(detour)
+            end
+
+            setstackhidden(detour, true)
+
+            local ok, _ = pcall(function()
+                TrustFunction(detour)
+
+                if hookfn == hookmetamethod then
+                    original_func = hookfn(inst, metamethod, detour)
+                else
+                    original_func = hookfn(func, detour)
+                end
+            end)
+
+            if not ok then
+                LocalPlayer:Kick("[AethSec]: Bypass failed! n1")
+            end
+
+            return original_func
+        end
+
+        local SafeCall = function(func, ...)
+            if checkcaller() then
+                return func(...)
+            end
+
+            local old = getthreadidentity()
+            if old ~= 2 then
+                setthreadidentity(2)
+            end
+
+            local result = {func(...)}
+
+            if old ~= 2 then
+                setthreadidentity(old)
+            end
+
+            return table.unpack(result)
+        end
+
+        local monitor_conn = ScriptContext.Error:Connect(TrustFunction(function(message, stack, _)
+            message = tostring(message)
+            stack = tostring(stack)
+            if stack:find("PlayerScripts.Controllers.MiscellaneousController") and message:find("attempt to index number with number") then
+                LocalPlayer:Kick("[AethSec]: Bypass failed! n2")
+            end
+        end))
+
+        local oldindex; oldindex = SafeHook(hookmetamethod, ac_script, "__index", function(t, k)
+            local is_caller = not bypassed and checkcaller()
+            if t == ac_script and not is_caller and kProtectedProperties[k] ~= nil then
+                return kProtectedProperties[k]
+            end
+            if checkcaller() then
+                return oldindex(t, k)
+            end
+            return SafeCall(oldindex, t, k)
+        end)
+
+        local oldnewindex; oldnewindex = SafeHook(hookmetamethod, ac_script, "__newindex", function(t, k, v)
+            local is_caller = not bypassed and checkcaller()
+            if t == ac_script and not is_caller and kProtectedProperties[k] ~= nil then
+                kProtectedProperties[k] = v
+                if k == "Enabled" then
+                    kProtectedProperties["Disabled"] = not v
+                end
+
+                if k == "Disabled" then
+                    kProtectedProperties["Enabled"] = not v
+                end
+                return
+            end
+            if checkcaller() then
+                return oldnewindex(t, k, v)
+            end
+            return SafeCall(oldnewindex, t, k, v)
+        end)
+
+        client_id = ""
+        last = tick()
+
+        local oldfireserver; oldfireserver = SafeHook(hookfunction, ac_event.FireServer, function(self, ...)
+            local now = tick()
+            local args = {...}
+
+            if not first_seen then
+                first_seen = true
+                local first_arg = args[1]
+
+                if type(first_arg) == "table" and #first_arg >= 1 and (type(first_arg[1]) == "string" or type(first_arg[1]) == "number") then
+                    client_id = tostring(first_arg[1])
+                else
+                    client_id = client_id or ""
+                end
+
+                last = tick()
+                samples = 1
+                hijack_ready = true
+
+                local res = SafeCall(oldfireserver, self, ...)
+                return res
+            end
+
+            local interval = now - (last or now)
+
+            if interval > 0 then
+                if samples == 0 then
+                    expected_interval = interval
+                else
+                    expected_interval = ema_alpha * interval + (1 - ema_alpha) * expected_interval
+                end
+
+                samples = samples + 1
+
+                if expected_interval < min_interval then
+                    expected_interval = min_interval
+                end
+            end
+
+            local res = SafeCall(oldfireserver, self, ...)
+            last = tick()
+
+            return res
+        end)
+
+        local BuildSubTable = function()
+            local num_empty = math.random(1, 5)
+            local empty_map = {}
+            local empty_slots = {7}
+            empty_map[7] = true
+
+            while #empty_slots < num_empty do
+                local slot = math.random(1, 6)
+                if not empty_map[slot] then
+                    empty_map[slot] = true
+                    table.insert(empty_slots, slot)
+                end
+            end
+
+            table.sort(empty_slots)
+
+            local result = {}
+            for i = 1, 7 do
+                if empty_map[i] then
+                    result[i] = {}
+                else
+                    result[i] = kFilledSub
+                end
+            end
+
+            return result, empty_slots
+        end
+
+        local ApplyTransforms = function(t, mask, empty_slots)
+            local payload = t[1]
+            local outer_index = #payload
+            local inner_index = empty_slots[math.random(1, #empty_slots)]
+            local derived
+            local outer_val = payload[outer_index]
+
+            if type(outer_val) == "table" and type(inner_index) == "number" then
+                derived = outer_val[inner_index]
+            else
+                for i = outer_index, 1, -1 do
+                    if type(payload[i]) ~= "table" then
+                        continue
+                    end
+
+                    local candidate = payload[i]
+
+                    if type(inner_index) == "number" and candidate[inner_index] ~= nil then
+                        derived = candidate[inner_index]
+                        break
+                    else
+                        derived = candidate
+                        break
+                    end
+                end
+
+                if derived == nil then
+                    derived = {}
+                end
+            end
+
+            local written = {}
+            local kSlotMapRef = kSlotMap
+
+            for _, value in ipairs(mask) do
+                local slot = kSlotMapRef[value]
+                if slot and not written[slot] then
+                    t[slot] = derived
+                    written[slot] = true
+                end
+            end
+
+            return t
+        end
+
+        local BuildPayload = function(challenge, mask)
+            local sub_table, empty_slots = BuildSubTable()
+            local total_idx = math.random(1, 8)
+            local payload = {client_id, buffer.tostring(challenge)}
+            local extra_strings = math.random(0, 2)
+
+            for _ = 1, extra_strings do
+                payload[#payload + 1] = ""
+            end
+
+            while #payload < (total_idx - 1) do
+                payload[#payload + 1] = math.random(5, 100000)
+            end
+
+            payload[#payload + 1] = sub_table
+
+            local t = {
+                payload,
+                {},
+                nil,
+                nil,
+                nil,
+                nil,
+                nil
+            }
+            return ApplyTransforms(t, mask, empty_slots)
+        end
+
+        task.spawn(function()
+            getfenv().script = ac_script
+            while not hijack_ready do
+                task.wait()
+            end
+
+            ac_script.Enabled = false
+
+            ac_event.OnClientEvent:Connect(function(...)
+                last = tick()
+
+                local remote = Instance.new("RemoteEvent", nil)
+                remote:FireServer()
+
+                local t = {...}
+                local challenge = t[1]
+                local index = t[2]
+                local mask = t[3]
+
+                if typeof(challenge) ~= "buffer" or type(index) ~= "number" or type(mask) ~= "table" then
+                    LocalPlayer:Kick("[AethSec]: Bypass failed! n3")
+                end
+
+                local payload = BuildPayload(challenge, mask)
+                task.defer(function()
+                    local since_last = tick() - (last or 0)
+                    local desired_wait = expected_interval - since_last
+
+                    if desired_wait > 0 then
+                        task.wait(desired_wait)
+                    end
+                    ac_event:FireServer(table.unpack(payload, 1, 5))
+                    last = tick()
+                    remote:Destroy()
+                end)
+            end)
+
+            bypassed = true
+            monitor_conn:Disconnect()
+        end)
+
+        for _, name in ipairs(kKickNames) do
+            local func = LocalPlayer[name]
+            if type(func) ~= "function" then return end
+
+            local oldfunc; oldfunc = SafeHook(hookfunction, func, function(self, ...)
+                if self == LocalPlayer and not checkcaller() then
+                    return nil
+                end
+                return oldfunc(self, ...)
+            end)
+        end
+
+        for _, conn in ipairs(getconnections(ScriptContext.Error)) do
+            if not conn.Function then continue end
+            if IsTrustedFunction(conn.Function) then continue end
+            SafeHook(hookfunction, conn.Function, function(...)
+                return nil
+            end)
+        end
+
+        SafeHook(hookfunction, ScriptContext.Error.Connect, function(...)
+            return nil
+        end)
+
+        while not bypassed do
+            task.wait(0.5)
+        end
+        task.wait(1)
+    end))
+end)
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+local char, root, hum
+local function rand(a, b) return a + math.random() * (b - a) end
+
+-- ================ fast melee ================
+local fastMelee = {
+    enabled = false, patchMelee = true, patchGuns = true,
+    cooldown = 0.001, snapshot = nil,
+}
+local gunExceptions = { Sniper = true, Crossbow = true, Bow = true, RPG = true }
+local MELEE_PROPS = {"AttackCooldown","SwingCooldown","MeleeCooldown","Cooldown","RecoveryTime","ResetTime"}
+local GUN_PROPS   = {"ShootSpread","ShootAccuracy","ShootRecoil","ShootCooldown","ShootBurstCooldown"}
+
+local function getItems()
+    if game.GameId ~= 6035872082 then return nil end
+    local ok, lib = pcall(function()
+        return require(game:GetService("ReplicatedStorage").Modules.ItemLibrary)
+    end)
+    if ok and lib and lib.Items then return lib.Items end
+    return nil
+end
+
+local function fastMeleeApply()
+    local items = getItems()
+    if not items then Notify("Fast Melee: item library not found", 3); return false end
+    if not fastMelee.snapshot then
+        local snap = {}
+        for name, data in pairs(items) do
+            if typeof(data) == "table" then
+                local entry = {}
+                for _, p in ipairs(MELEE_PROPS) do if data[p] ~= nil then entry[p] = data[p] end end
+                for _, p in ipairs(GUN_PROPS) do if data[p] ~= nil then entry[p] = data[p] end end
+                if next(entry) then snap[name] = entry end
+            end
+        end
+        fastMelee.snapshot = snap
+    end
+    local cd = fastMelee.cooldown
+    for name, data in pairs(items) do
+        if typeof(data) == "table" then
+            if fastMelee.patchMelee then
+                for _, p in ipairs(MELEE_PROPS) do if data[p] ~= nil then data[p] = cd end end
+            end
+            if fastMelee.patchGuns and not gunExceptions[name] then
+                if data.ShootSpread then data.ShootSpread = 0 end
+                if data.ShootAccuracy then data.ShootAccuracy = 0 end
+                if data.ShootRecoil then data.ShootRecoil = 0 end
+                if data.ShootCooldown then data.ShootCooldown = cd end
+                if data.ShootBurstCooldown then data.ShootBurstCooldown = cd end
+            end
+        end
+    end
+    Notify("Fast Melee applied", 2)
+    return true
+end
+
+local function fastMeleeRevert()
+    local items = getItems()
+    if not items or not fastMelee.snapshot then return false end
+    for name, props in pairs(fastMelee.snapshot) do
+        local data = items[name]
+        if typeof(data) == "table" then
+            for p, v in pairs(props) do pcall(function() data[p] = v end) end
+        end
+    end
+    fastMelee.snapshot = nil
+    Notify("Fast Melee reverted", 2)
+    return true
+end
+
+-- ================ void spam (expanded) ================
+local voidSpam = {
+    enabled = false, method = "Quantum", tickMode = "Static",
+    rateHz = 120, amplitude = 1e12, radius = 1e12,
+    yMin = -1e12, yMax = 1e12,
+    jitter = true, jitterAmp = 5e11,
+    randomizeEachTick = true,
+    stopOnDamage = false, autoReenable = false,
+    clampY = true, clampYAbs = 9e14,
+    offsetX = 0, offsetY = 0, offsetZ = 0,
+    spreadX = 1, spreadY = 1, spreadZ = 1,
+    axisX = true, axisY = true, axisZ = true,
+    lineAngle = 45, lineLen = 1e12,
+    fibCount = 200, gridStep = 1e11, gridExtent = 5,
+    preserveY = false,
+    pointsPerTick = 1,
+    anchorFrames = 3,
+    reboundBox = 5e11,
+    interpTime = 0.05,
+    detectLockout = false,
+    lockoutThreshold = 10,
+    lockoutWindow = 2.0,
+    orbitCombo = false,
+    orbitComboRadius = 20,
+    orbitComboSpeed = 90,
+}
+local vsConns = {}
+local vsDamageHooked = false
+local vsAnchorFrame = 0
+local vsLastAnchorPos = nil
+local vsInterpStart, vsInterpEnd, vsInterpStartT = nil, nil, 0
+local vsReboundPos = nil
+local vsReboundDir = nil
+local vsCorrectionTimes = {}
+local vsLockedOut = false
+local vsLastRealPos = nil
+
+local function vsPoint(i)
+    local a = voidSpam.amplitude
+    local m = voidSpam.method
+    local base = Vector3.new(voidSpam.offsetX, voidSpam.offsetY, voidSpam.offsetZ)
+    local p
+    if m == "Quantum" then
+        p = Vector3.new(rand(-a,a)*voidSpam.spreadX, rand(voidSpam.yMin, voidSpam.yMax)*voidSpam.spreadY, rand(-a,a)*voidSpam.spreadZ)
+    elseif m == "Scatter" then
+        p = Vector3.new(rand(-a,a), rand(voidSpam.yMin, voidSpam.yMax), rand(-a,a))
+    elseif m == "Grid" then
+        local s, e = voidSpam.gridStep, voidSpam.gridExtent
+        p = Vector3.new(math.random(-e,e)*s, math.random(-e,e)*s, math.random(-e,e)*s)
+    elseif m == "Sphere" then
+        local phi = math.random() * math.pi * 2
+        local theta = math.acos(2 * math.random() - 1)
+        local r = voidSpam.radius
+        p = Vector3.new(r*math.sin(theta)*math.cos(phi), r*math.cos(theta), r*math.sin(theta)*math.sin(phi))
+    elseif m == "Chaos" then
+        local t = tick()*5 + i
+        p = Vector3.new(math.sin(t*3.1)*a, math.cos(t*7.3)*math.min(a, voidSpam.yMax), math.sin(t*5.7)*a)
+    elseif m == "Line" then
+        local ang = math.rad(voidSpam.lineAngle)
+        local s = rand(-voidSpam.lineLen, voidSpam.lineLen)
+        p = Vector3.new(math.cos(ang)*s, 0, math.sin(ang)*s)
+    elseif m == "Fibonacci" then
+        local n = voidSpam.fibCount
+        local idx = i % n
+        local gr = (1 + math.sqrt(5)) / 2
+        local theta = 2 * math.pi * idx / gr
+        local phi = math.acos(1 - 2 * (idx + 0.5) / n)
+        local r = voidSpam.radius
+        p = Vector3.new(r*math.sin(phi)*math.cos(theta), r*math.cos(phi), r*math.sin(phi)*math.sin(theta))
+    elseif m == "Helix" then
+        local t = i * 0.05
+        p = Vector3.new(math.cos(t)*a*0.5, math.sin(t*2)*voidSpam.yMax*0.5, math.sin(t)*a*0.5)
+    elseif m == "DualBand" then
+        local band = (i % 2 == 0) and voidSpam.yMax or voidSpam.yMin
+        p = Vector3.new(rand(-a,a), band, rand(-a,a))
+    end
+    if not p then p = Vector3.zero end
+    if not voidSpam.axisX then p = Vector3.new(0, p.Y, p.Z) end
+    if not voidSpam.axisY then p = Vector3.new(p.X, 0, p.Z) end
+    if not voidSpam.axisZ then p = Vector3.new(p.X, p.Y, 0) end
+    return base + p
+end
+
+local function vsApplyOrbitCombo(p)
+    if not voidSpam.orbitCombo then return p end
+    local a = tick() * math.rad(voidSpam.orbitComboSpeed)
+    return p + Vector3.new(math.cos(a), 0, math.sin(a)) * voidSpam.orbitComboRadius
+end
+
+local function vsRecordCorrection(newPos)
+    if vsLastRealPos and (newPos - vsLastRealPos).Magnitude > voidSpam.amplitude * 0.5 then
+        table.insert(vsCorrectionTimes, tick())
+    end
+    vsLastRealPos = newPos
+    local now = tick()
+    while #vsCorrectionTimes > 0 and now - vsCorrectionTimes[1] > voidSpam.lockoutWindow do
+        table.remove(vsCorrectionTimes, 1)
+    end
+    if voidSpam.detectLockout and #vsCorrectionTimes > voidSpam.lockoutThreshold and not vsLockedOut then
+        vsLockedOut = true
+        Notify("Void lockout: server correcting too frequently", 3)
+        task.delay(voidSpam.lockoutWindow, function() vsLockedOut = false end)
+    end
+end
+
+local function vsExecute(i)
+    if vsLockedOut then return end
+    local mode = voidSpam.tickMode
+    local hrp = root
+    if not hrp then return end
+    local now = tick()
+    local target
+
+    if mode == "Static" then
+        target = vsApplyOrbitCombo(vsPoint(i))
+        if voidSpam.jitter then target = target + Vector3.new(rand(-1,1), rand(-1,1), rand(-1,1)) * voidSpam.jitterAmp end
+        if voidSpam.preserveY then target = Vector3.new(target.X, hrp.Position.Y, target.Z) end
+        if voidSpam.clampY then target = Vector3.new(target.X, math.clamp(target.Y, -voidSpam.clampYAbs, voidSpam.clampYAbs), target.Z) end
+        hrp.CFrame = CFrame.new(target)
+    elseif mode == "Pulse" then
+        local realPos = hrp.Position
+        local jumpPos = vsApplyOrbitCombo(vsPoint(i))
+        hrp.CFrame = CFrame.new(jumpPos)
+        task.defer(function()
+            if root and root.Parent then root.CFrame = CFrame.new(realPos) end
+        end)
+    elseif mode == "Anchor" then
+        if vsAnchorFrame == 0 then
+            vsLastAnchorPos = vsApplyOrbitCombo(vsPoint(i))
+            if voidSpam.jitter then vsLastAnchorPos = vsLastAnchorPos + Vector3.new(rand(-1,1), rand(-1,1), rand(-1,1)) * voidSpam.jitterAmp end
+            if voidSpam.clampY then vsLastAnchorPos = Vector3.new(vsLastAnchorPos.X, math.clamp(vsLastAnchorPos.Y, -voidSpam.clampYAbs, voidSpam.clampYAbs), vsLastAnchorPos.Z) end
+        end
+        vsAnchorFrame = (vsAnchorFrame + 1) % math.max(1, voidSpam.anchorFrames)
+        if vsLastAnchorPos then hrp.CFrame = CFrame.new(vsLastAnchorPos) end
+    elseif mode == "Rebound" then
+        local box = voidSpam.reboundBox
+        if not vsReboundPos then
+            vsReboundPos = vsPoint(i)
+            vsReboundDir = Vector3.new(rand(-1,1), rand(-1,1), rand(-1,1)).Unit
+        end
+        vsReboundPos = vsReboundPos + (vsReboundDir or Vector3.new(1,0,0)) * (box * 0.05)
+        if math.abs(vsReboundPos.X) > box then vsReboundDir = Vector3.new(-vsReboundDir.X, vsReboundDir.Y, vsReboundDir.Z) end
+        if math.abs(vsReboundPos.Y) > box then vsReboundDir = Vector3.new(vsReboundDir.X, -vsReboundDir.Y, vsReboundDir.Z) end
+        if math.abs(vsReboundPos.Z) > box then vsReboundDir = Vector3.new(vsReboundDir.X, vsReboundDir.Y, -vsReboundDir.Z) end
+        target = vsApplyOrbitCombo(vsReboundPos)
+        if voidSpam.clampY then target = Vector3.new(target.X, math.clamp(target.Y, -voidSpam.clampYAbs, voidSpam.clampYAbs), target.Z) end
+        hrp.CFrame = CFrame.new(target)
+    elseif mode == "Interp" then
+        if not vsInterpStart or now - vsInterpStartT > voidSpam.interpTime then
+            vsInterpStart = vsPoint(i)
+            vsInterpEnd = vsPoint(i + 1)
+            vsInterpStartT = now
+        end
+        local alpha = math.clamp((now - vsInterpStartT) / math.max(0.001, voidSpam.interpTime), 0, 1)
+        target = vsInterpStart:Lerp(vsInterpEnd, alpha)
+        if voidSpam.clampY then target = Vector3.new(target.X, math.clamp(target.Y, -voidSpam.clampYAbs, voidSpam.clampYAbs), target.Z) end
+        hrp.CFrame = CFrame.new(target)
+    elseif mode == "Silent" then
+        local real = hrp.CFrame
+        local fake = vsApplyOrbitCombo(vsPoint(i))
+        hrp.CFrame = CFrame.new(fake)
+        task.defer(function()
+            if root and root.Parent then root.CFrame = real end
+        end)
+    end
+end
+
+function startVoidSpam()
+    stopVoidSpam()
+    if not root then return end
+    vsLockedOut = false
+    if voidSpam.stopOnDamage and not vsDamageHooked and hum then
+        vsDamageHooked = true
+        vsConns.dmg = hum.HealthChanged:Connect(function(h)
+            if h < hum.MaxHealth and voidSpam.enabled and voidSpam.stopOnDamage then
+                voidSpam.enabled = false
+                if Toggles.VoidSpamToggle then pcall(function() Toggles.VoidSpamToggle:SetValue(false) end) end
+                stopVoidSpam()
+                if voidSpam.autoReenable then
+                    task.delay(2, function()
+                        if not voidSpam.enabled then
+                            voidSpam.enabled = true
+                            if Toggles.VoidSpamToggle then pcall(function() Toggles.VoidSpamToggle:SetValue(true) end) end
+                            startVoidSpam()
+                        end
+                    end)
+                end
+            end
+        end)
+    end
+    local i, last = 0, 0
+    vsConns.loop = RunService.Heartbeat:Connect(function()
+        if not voidSpam.enabled or not root then return end
+        vsRecordCorrection(root.Position)
+        local now = tick()
+        local interval = 1 / math.max(1, voidSpam.rateHz)
+        if now - last < interval then return end
+        last = now
+        for _ = 1, math.max(1, voidSpam.pointsPerTick) do
+            i = i + 1
+            if voidSpam.randomizeEachTick then
+                voidSpam.amplitude = voidSpam.amplitude * (0.9 + math.random()*0.2)
+                voidSpam.radius = voidSpam.radius * (0.9 + math.random()*0.2)
+            end
+            vsExecute(i)
+        end
+    end)
+end
+
+function stopVoidSpam()
+    for k, c in pairs(vsConns) do pcall(function() c:Disconnect() end); vsConns[k] = nil end
+    vsDamageHooked = false
+    vsAnchorFrame = 0; vsLastAnchorPos = nil
+    vsInterpStart = nil; vsInterpEnd = nil; vsInterpStartT = 0
+    vsReboundPos = nil; vsReboundDir = nil
+    vsCorrectionTimes = {}; vsLockedOut = false; vsLastRealPos = nil
+end
+
+-- void helper
+local vsHelper = {
+    enabled = false, adaptRate = true, rateMin = 60, rateMax = 400,
+    adaptAmp = true, ampScale = 1.3,
+    reactToDamage = true, reactToVelocity = true, velThreshold = 40,
+    cooldown = 0.5, autoClampY = true, yAbsCap = 1e14,
+    dodgeOnDamage = true, dodgeDist = 30,
+}
+local vhConns = {}
+local vhLast = 0
+
+local function vhTick()
+    if not vsHelper.enabled or not voidSpam.enabled then return end
+    local now = tick()
+    if now - vhLast < vsHelper.cooldown then return end
+    vhLast = now
+    if vsHelper.adaptRate then voidSpam.rateHz = math.clamp(voidSpam.rateHz * 1.15, vsHelper.rateMin, vsHelper.rateMax) end
+    if vsHelper.adaptAmp then voidSpam.amplitude = math.min(voidSpam.amplitude * vsHelper.ampScale, 1e15) end
+    if vsHelper.autoClampY then voidSpam.clampYAbs = math.min(voidSpam.clampYAbs, vsHelper.yAbsCap) end
+    if vsHelper.reactToVelocity and root and root.AssemblyLinearVelocity.Magnitude > vsHelper.velThreshold then
+        voidSpam.rateHz = math.min(voidSpam.rateHz * 1.2, vsHelper.rateMax)
+    end
+end
+
+function startVSHelper()
+    stopVSHelper()
+    vsHelper.enabled = true
+    vhConns.loop = task.spawn(function()
+        while vsHelper.enabled do task.wait(vsHelper.cooldown); pcall(vhTick) end
+    end)
+    if vsHelper.reactToDamage and hum then
+        vhConns.dmg = hum.HealthChanged:Connect(function(h)
+            if h < hum.MaxHealth and vsHelper.enabled then
+                if vsHelper.dodgeOnDamage and root then
+                    local dirs = {Vector3.new(1,0,0), Vector3.new(-1,0,0), Vector3.new(0,0,1), Vector3.new(0,0,-1)}
+                    root.CFrame = root.CFrame + dirs[math.random(1, #dirs)] * vsHelper.dodgeDist
+                end
+                voidSpam.rateHz = math.min(voidSpam.rateHz * 1.3, vsHelper.rateMax)
+                voidSpam.jitterAmp = math.min(voidSpam.jitterAmp * 1.5, 1e13)
+            end
+        end)
+    end
+end
+
+function stopVSHelper()
+    vsHelper.enabled = false
+    for k, c in pairs(vhConns) do
+        if typeof(c) == "thread" then pcall(task.cancel, c) end
+        if typeof(c) == "RBXScriptConnection" then pcall(function() c:Disconnect() end) end
+        vhConns[k] = nil
+    end
+end
+
+-- ================ orbit (expanded) ================
+local orbit = {
+    enabled = false, target = "Closest", mode = "Circle",
+    speed = 90, radius = 8, height = 0, lerp = 0.3,
+    reverse = false, face = true, axis = "XZ",
+    offX = 0, offY = 0, offZ = 0, yawOff = 0, pitchOff = 0,
+    predictive = false, lead = 0.2,
+    randomRadius = false, rMin = 5, rMax = 20,
+    speedPulse = false, speedPulseAmp = 0.5, speedPulseHz = 1,
+    heightOsc = false, heightOscAmp = 5, heightOscHz = 2,
+    distPulse = false, distPulseAmp = 4, distPulseHz = 1,
+    zigAmp = 3, zigHz = 4,
+    lissA = 3, lissB = 2, lissDelta = math.pi/2,
+    spiralGrow = 0.5, helixPitch = 1.5,
+    pendulumAmp = 45, pendulumHz = 1,
+    dual = false,
+    dualBlend = 0.4,
+    easing = "smooth",
+    autoScale = false,
+    autoScaleMult = 0.02,
+    velocityInject = false,
+    velocityInjectMag = 150,
+    randomHeightPerRev = false,
+    randomHeightRange = 20,
+    lockFacingToVel = false,
+}
+local orbitConns = {}
+local orbitT = 0
+local orbitLastRev = 0
+local orbitCurHeight = 0
+local orbitCurTarget = nil
+
+local function orbitCandidates()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local h = p.Character:FindFirstChildOfClass("Humanoid")
+            local r = p.Character:FindFirstChild("HumanoidRootPart")
+            if h and r and h.Health > 0 then table.insert(list, {player=p, root=r}) end
+        end
+    end
+    return list
+end
+
+local function orbitSortPick(list, mode)
+    if #list == 0 then return nil end
+    if mode == "Random" then return list[math.random(1,#list)] end
+    if mode == "Mouse" then return list[1] end
+    local myPos = root and root.Position or Vector3.zero
+    local best, bestD
+    for _, e in ipairs(list) do
+        local d = (e.root.Position - myPos).Magnitude
+        if mode == "Closest" then
+            if not bestD or d < bestD then best=e; bestD=d end
+        elseif mode == "Farthest" then
+            if not bestD or d > bestD then best=e; bestD=d end
+        end
+    end
+    return best
+end
+
+local function orbitPick()
+    return orbitSortPick(orbitCandidates(), orbit.target)
+end
+
+local function orbitPickSecondary(primary)
+    local list = orbitCandidates()
+    local filtered = {}
+    for _, e in ipairs(list) do
+        if not primary or e.player ~= primary.player then table.insert(filtered, e) end
+    end
+    return orbitSortPick(filtered, orbit.target)
+end
+
+local function easeValue(alpha)
+    local e = orbit.easing
+    if e == "linear" then return alpha
+    elseif e == "sine" then return math.sin(alpha * math.pi * 0.5)
+    else return alpha * alpha * (3 - 2 * alpha) end
+end
+
+local function orbitOffset(t, targetSpeed)
+    local spd = math.rad(orbit.speed) * (orbit.reverse and -1 or 1)
+    local r = orbit.radius
+    if orbit.randomRadius then r = rand(orbit.rMin, orbit.rMax) end
+    if orbit.speedPulse then spd = spd * (1 + math.sin(t*orbit.speedPulseHz*2*math.pi)*orbit.speedPulseAmp) end
+    if orbit.distPulse then r = r + math.sin(t*orbit.distPulseHz*2*math.pi)*orbit.distPulseAmp end
+    if orbit.autoScale then r = r + (targetSpeed or 0) * orbit.autoScaleMult end
+
+    local h = orbit.height
+    if orbit.heightOsc then h = h + math.sin(t*orbit.heightOscHz*2*math.pi)*orbit.heightOscAmp end
+    local a = t * spd
+
+    local rev = math.floor(a / (2 * math.pi))
+    if orbit.randomHeightPerRev and rev ~= orbitLastRev then
+        orbitLastRev = rev
+        orbitCurHeight = rand(-orbit.randomHeightRange, orbit.randomHeightRange)
+    end
+    if orbit.randomHeightPerRev then h = h + orbitCurHeight end
+
+    local m = orbit.mode
+    if m == "Circle" then return Vector3.new(math.cos(a)*r, h, math.sin(a)*r)
+    elseif m == "Figure8" then return Vector3.new(math.sin(a)*r, h, math.sin(a)*math.cos(a)*r)
+    elseif m == "Spiral" then
+        local gr = r + t*orbit.spiralGrow
+        return Vector3.new(math.cos(a)*gr, h+math.sin(a*0.5)*2, math.sin(a)*gr)
+    elseif m == "Lissajous" then
+        return Vector3.new(math.sin(orbit.lissA*a)*r, h, math.sin(orbit.lissB*a+orbit.lissDelta)*r)
+    elseif m == "Pendulum" then
+        local ang = math.sin(a*orbit.pendulumHz)*math.rad(orbit.pendulumAmp)
+        return Vector3.new(math.sin(ang)*r, h-math.cos(ang)*r*0.1, math.cos(ang)*r)
+    elseif m == "Zigzag" then
+        local zz = math.sin(t*orbit.zigHz*2*math.pi)*orbit.zigAmp
+        return Vector3.new(math.cos(a)*r, h+zz, math.sin(a)*r)
+    elseif m == "Helix" then
+        local hy = h + math.sin(a)*orbit.helixPitch*r*0.3 + (a/(2*math.pi))*orbit.helixPitch
+        return Vector3.new(math.cos(a)*r, hy, math.sin(a)*r)
+    end
+    return Vector3.new(math.cos(a)*r, h, math.sin(a)*r)
+end
+
+local function applyAxis(v)
+    if orbit.axis == "XY" then return Vector3.new(v.X, v.Z, v.Y) end
+    if orbit.axis == "YZ" then return Vector3.new(v.Z, v.X, v.Y) end
+    return v
+end
+
+function startOrbit()
+    stopOrbit()
+    orbit.enabled = true
+    orbitT = 0
+    orbitLastRev = 0
+    orbitCurHeight = 0
+    orbitConns.loop = RunService.RenderStepped:Connect(function(dt)
+        if not orbit.enabled or not root then return end
+        orbitT = orbitT + dt
+
+        local primary = orbitPick()
+        if not primary then return end
+        orbitCurTarget = primary
+
+        local tgtPos = primary.root.Position
+        if orbit.predictive then tgtPos = tgtPos + primary.root.AssemblyLinearVelocity * orbit.lead end
+
+        if orbit.dual then
+            local secondary = orbitPickSecondary(primary)
+            if secondary then
+                local sPos = secondary.root.Position
+                if orbit.predictive then sPos = sPos + secondary.root.AssemblyLinearVelocity * orbit.lead end
+                tgtPos = tgtPos:Lerp(sPos, math.clamp(orbit.dualBlend, 0, 1))
+            end
+        end
+
+        local targetSpeed = primary.root.AssemblyLinearVelocity.Magnitude
+        local off = applyAxis(orbitOffset(orbitT, targetSpeed))
+        off = off + Vector3.new(orbit.offX, orbit.offY, orbit.offZ)
+        local want = tgtPos + off
+
+        local raw = root.Position:Lerp(want, math.clamp(orbit.lerp, 0, 1))
+        local eased = root.Position:Lerp(raw, easeValue(math.clamp(orbit.lerp, 0, 1)))
+
+        local cf = CFrame.new(eased)
+        if orbit.face then
+            if orbit.lockFacingToVel and primary.root.AssemblyLinearVelocity.Magnitude > 1 then
+                local look = eased + primary.root.AssemblyLinearVelocity.Unit * 10
+                cf = CFrame.lookAt(eased, look)
+            else
+                cf = CFrame.lookAt(eased, tgtPos)
+            end
+            cf = cf * CFrame.Angles(math.rad(orbit.pitchOff), math.rad(orbit.yawOff), 0)
+        end
+        root.CFrame = cf
+
+        if orbit.velocityInject then
+            local dir = (want - root.Position)
+            if dir.Magnitude > 0.01 then
+                root.AssemblyLinearVelocity = dir.Unit * orbit.velocityInjectMag
+            end
+        end
+    end)
+end
+
+function stopOrbit()
+    orbit.enabled = false
+    orbitCurTarget = nil
+    for k, c in pairs(orbitConns) do pcall(function() c:Disconnect() end); orbitConns[k] = nil end
+end
+
+-- ================ bait ================
+local bait = {
+    enabled = false, mode = "Stall",
+    stallTime = 0.08, stallChance = 0.4, fakeLockTime = 0.06,
+    pulseHz = 4, pulseFreezeTime = 0.03, freezeTime = 0.05, snapDistance = 40,
+    lureMove = 6, lureHold = 0.15,
+    notifyLabel = true, autoEvade = true, evadeTrigger = "Attack",
+    evadeDist = 25, evadeCooldown = 0.4, evadePower = 80,
+}
+local baitConns = {}
+local baitLastEvade = 0
+
+local function baitEvade()
+    if not root then return end
+    local now = tick()
+    if now - baitLastEvade < bait.evadeCooldown then return end
+    baitLastEvade = now
+    local dirs = {Vector3.new(1,0,0), Vector3.new(-1,0,0), Vector3.new(0,0,1), Vector3.new(0,0,-1), Vector3.new(1,0,1).Unit, Vector3.new(-1,0,-1).Unit}
+    root.CFrame = root.CFrame + dirs[math.random(1, #dirs)] * bait.evadePower
+    if bait.notifyLabel then Notify("BAIT → EVADE", 1) end
+end
+
+local function baitLoop()
+    if not bait.enabled or not root then return end
+    local mode = bait.mode
+    if mode == "Stall" then
+        if math.random() < bait.stallChance then task.wait(bait.stallTime) end
+    elseif mode == "FakeLock" then
+        local old = root.CFrame
+        task.wait(bait.fakeLockTime)
+        if root and root.Parent then root.CFrame = old end
+    elseif mode == "Pulse" then
+        task.wait(1 / math.max(1, bait.pulseHz))
+        if root and root.Parent then
+            local h = root.CFrame
+            task.wait(bait.pulseFreezeTime)
+            if root and root.Parent then root.CFrame = h end
+        end
+    elseif mode == "FreezeSnap" then
+        local h = root.CFrame
+        task.wait(bait.freezeTime)
+        if root and root.Parent then
+            root.CFrame = h + Vector3.new(math.random(-bait.snapDistance, bait.snapDistance), 0, math.random(-bait.snapDistance, bait.snapDistance))
+        end
+    elseif mode == "Lure" then
+        root.CFrame = root.CFrame + root.CFrame.LookVector * bait.lureMove
+        task.wait(bait.lureHold)
+    end
+end
+
+function startBait()
+    stopBait()
+    bait.enabled = true
+    baitConns.loop = task.spawn(function()
+        while bait.enabled do pcall(baitLoop); task.wait(0.05) end
+    end)
+    if bait.autoEvade then
+        baitConns.evade = RunService.Heartbeat:Connect(function()
+            if not bait.enabled or not root then return end
+            if bait.evadeTrigger == "Proximity" or bait.evadeTrigger == "Both" then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= LocalPlayer and p.Character then
+                        local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                        local h = p.Character:FindFirstChildOfClass("Humanoid")
+                        if hrp and h and h.Health > 0 and (hrp.Position - root.Position).Magnitude < bait.evadeDist then
+                            baitEvade(); break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end
+
+function stopBait()
+    bait.enabled = false
+    for k, c in pairs(baitConns) do
+        if typeof(c) == "RBXScriptConnection" then pcall(function() c:Disconnect() end) end
+        if typeof(c) == "thread" then pcall(task.cancel, c) end
+        baitConns[k] = nil
+    end
+end
+
+-- ================ anti-bait ================
+local antiBait = {
+    enabled = false, detectRadius = 60,
+    detectCommit = true, commitDot = 0.85, commitDist = 80,
+    dodgeDist = 60, dodgeCooldown = 0.05,
+    evadeBait = true, stallThreshold = 0.15, notify = false,
+}
+local abConns = {}
+local abLast = 0
+
+local function abDodge(fromPos)
+    if not root then return end
+    local now = tick()
+    if now - abLast < antiBait.dodgeCooldown then return end
+    abLast = now
+    local away = root.Position - fromPos
+    if away.Magnitude < 0.01 then away = Vector3.new(1,0,0) end
+    away = away.Unit
+    local perp = Vector3.new(-away.Z, 0, away.X)
+    local dir = (away * 0.6 + perp * (math.random() < 0.5 and -0.4 or 0.4)).Unit
+    root.CFrame = root.CFrame + dir * antiBait.dodgeDist
+    if antiBait.notify then Notify("Anti-Bait dodge", 1) end
+end
+
+function startAntiBait()
+    stopAntiBait()
+    antiBait.enabled = true
+    abConns.loop = RunService.Heartbeat:Connect(function()
+        if not antiBait.enabled or not root then return end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                local h = p.Character:FindFirstChildOfClass("Humanoid")
+                if hrp and h and h.Health > 0 then
+                    local delta = hrp.Position - root.Position
+                    local dist = delta.Magnitude
+                    if dist < antiBait.detectRadius then
+                        if antiBait.detectCommit then
+                            if hrp.CFrame.LookVector:Dot((-delta).Unit) > antiBait.commitDot and dist < antiBait.commitDist then
+                                abDodge(hrp.Position)
+                            end
+                        end
+                        if antiBait.evadeBait and hrp.AssemblyLinearVelocity.Magnitude < antiBait.stallThreshold and dist < antiBait.detectRadius * 0.5 then
+                            abDodge(hrp.Position)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+function stopAntiBait()
+    antiBait.enabled = false
+    for k, c in pairs(abConns) do pcall(function() c:Disconnect() end); abConns[k] = nil end
+end
+
+-- ================ freeze bait ================
+local freezeBait = {
+    enabled = false, freezeTime = 0.1, freezeInterval = 0.5,
+    snapDist = 60, snapVertical = 20, randomDir = true,
+    notify = true, lockCFrame = true, onAttackOnly = false,
+    attackDetectRange = 30, jitterDuring = false, jitterAmp = 5,
+}
+local fbConns = {}
+local fbActive = false
+
+local function fbTick()
+    if not freezeBait.enabled or not root then return end
+    if freezeBait.onAttackOnly then
+        local attacked = false
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                if hrp and (hrp.Position - root.Position).Magnitude < freezeBait.attackDetectRange and hrp.CFrame.LookVector:Dot((root.Position - hrp.Position).Unit) > 0.8 then
+                    attacked = true; break
+                end
+            end
+        end
+        if not attacked then return end
+    end
+    if fbActive then return end
+    fbActive = true
+    local frozen = root.CFrame
+    if freezeBait.jitterDuring then
+        local startT = tick()
+        while tick() - startT < freezeBait.freezeTime do
+            if not root or not freezeBait.enabled then break end
+            root.CFrame = frozen + Vector3.new(math.random(-freezeBait.jitterAmp, freezeBait.jitterAmp), 0, math.random(-freezeBait.jitterAmp, freezeBait.jitterAmp))
+            RunService.Heartbeat:Wait()
+        end
+    elseif freezeBait.lockCFrame then
+        local lockConn = RunService.Heartbeat:Connect(function()
+            if root and freezeBait.enabled then root.CFrame = frozen end
+        end)
+        task.wait(freezeBait.freezeTime)
+        lockConn:Disconnect()
+    else
+        task.wait(freezeBait.freezeTime)
+    end
+    if root then
+        local off = freezeBait.randomDir
+            and Vector3.new(math.random(-freezeBait.snapDist, freezeBait.snapDist), math.random(-freezeBait.snapVertical, freezeBait.snapVertical), math.random(-freezeBait.snapDist, freezeBait.snapDist))
+            or Vector3.new(freezeBait.snapDist, freezeBait.snapVertical, 0)
+        root.CFrame = frozen + off
+        if freezeBait.notify then Notify("Freeze Bait snap", 1) end
+    end
+    fbActive = false
+end
+
+function startFreezeBait()
+    stopFreezeBait()
+    freezeBait.enabled = true
+    fbConns.loop = task.spawn(function()
+        while freezeBait.enabled do task.wait(freezeBait.freezeInterval); pcall(fbTick) end
+    end)
+end
+
+function stopFreezeBait()
+    freezeBait.enabled = false
+    for k, c in pairs(fbConns) do
+        if typeof(c) == "thread" then pcall(task.cancel, c) end
+        if typeof(c) == "RBXScriptConnection" then pcall(function() c:Disconnect() end) end
+        fbConns[k] = nil
+    end
+    fbActive = false
+end
+
+-- ================ prediction ================
+local predict = {
+    enabled = false, method = "Trajectory",
+    detectTpEnabled = true, tpThreshold = 30, tpWindow = 0.4,
+    voidDetectEnabled = true, voidProxThreshold = 15, voidVelocitySpike = 200,
+    detectAccel = true, accelThreshold = 500,
+    dodgeDist = 40, dodgeCooldown = 0.06, dodgeRange = 80,
+    predictLead = 0.15, reactiveLayers = 3, layerGap = 0.02,
+    randomizeDir = true, preferPerpendicular = true,
+    verticalSpike = true, verticalSpikeAmp = 15,
+    notify = false, ignoreBait = true, stallThreshold = 2.0,
+    priorityMode = "Closest",
+    threatScoreEnabled = true, threatScoreRange = 120,
+    aimVectorDetect = true, multithreaded = true,
+    predictTable = {}, lastDodge = 0, lastNotify = 0,
+}
+local predictLastPos = {}
+
+local function recFor(plr, hrp)
+    local rec = predict.predictTable[plr]
+    if not rec then
+        rec = { history = {}, lastVel = Vector3.zero, lastPos = hrp.Position, lastTick = tick() }
+        predict.predictTable[plr] = rec
+    end
+    return rec
+end
+
+local function pushHistory(plr, hrp)
+    local rec = recFor(plr, hrp)
+    local now = tick()
+    table.insert(rec.history, { pos = hrp.Position, t = now })
+    while #rec.history > 0 and now - rec.history[1].t > predict.tpWindow do
+        table.remove(rec.history, 1)
+    end
+    rec.lastPos = hrp.Position
+    rec.lastVel = hrp.AssemblyLinearVelocity
+    rec.lastTick = now
+end
+
+local function scoreThreat(hrp)
+    if not root then return 0 end
+    local delta = hrp.Position - root.Position
+    local dist = delta.Magnitude
+    if dist > predict.threatScoreRange then return 0 end
+    local score = (1 - dist / predict.threatScoreRange) * 50
+    score = score + math.min(hrp.AssemblyLinearVelocity.Magnitude / 5, 30)
+    if predict.aimVectorDetect then
+        local dot = hrp.CFrame.LookVector:Dot((-delta).Unit)
+        if dot > 0.85 then score = score + 20 end
+    end
+    return score
+end
+
+local function execDodge(hrp, reason)
+    if not root then return end
+    local now = tick()
+    if now - predict.lastDodge < predict.dodgeCooldown then return end
+    predict.lastDodge = now
+    local method = predict.method
+    local dist = predict.dodgeDist
+    local pushVec
+    if method == "RadialBurst" then
+        local away = root.Position - hrp.Position
+        if away.Magnitude < 0.01 then away = Vector3.new(1,0,0) end
+        pushVec = away.Unit * dist
+    elseif method == "PredictiveOrbit" then
+        local future = hrp.Position + hrp.AssemblyLinearVelocity * predict.predictLead
+        local away = root.Position - future
+        if away.Magnitude < 0.01 then away = Vector3.new(1,0,0) end
+        local perp = Vector3.new(-away.Z, 0, away.X)
+        pushVec = (away.Unit * 0.4 + perp * 0.9).Unit * dist
+    elseif method == "Slingshot" then
+        local fwd = hrp.CFrame.LookVector
+        local side = Vector3.new(-fwd.Z, 0, fwd.X)
+        local sign = math.random() < 0.5 and -1 or 1
+        pushVec = side * sign * dist + fwd * (dist * 0.3)
+    elseif method == "CounterDive" then
+        local away = root.Position - hrp.Position
+        if away.Magnitude < 0.01 then away = Vector3.new(1,0,0) end
+        pushVec = away.Unit * dist * 0.5 + Vector3.new(0, -dist * 0.4, 0)
+    elseif method == "Random" then
+        local a = math.random() * math.pi * 2
+        pushVec = Vector3.new(math.cos(a), math.random(-0.3, 0.3), math.sin(a)).Unit * dist
+    elseif method == "Silent" then
+        pushVec = CFrame.new(hrp.Position, root.Position).LookVector * -dist
+    elseif method == "Layered" then
+        task.spawn(function()
+            for i = 1, predict.reactiveLayers do
+                if not root then break end
+                local a = math.random() * math.pi * 2
+                local d = Vector3.new(math.cos(a), 0, math.sin(a)) * (dist * (0.7 + i * 0.2))
+                root.CFrame = root.CFrame + d
+                task.wait(predict.layerGap)
+            end
+        end)
+        return
+    else
+        local away = root.Position - hrp.Position
+        if away.Magnitude < 0.01 then away = Vector3.new(1,0,0) end
+        pushVec = away.Unit * dist
+    end
+    if predict.verticalSpike then
+        pushVec = pushVec + Vector3.new(0, math.random(-1,1) * predict.verticalSpikeAmp, 0)
+    end
+    root.CFrame = root.CFrame + pushVec
+    if predict.notify then
+        local n = tick()
+        if n - predict.lastNotify > 0.3 then
+            predict.lastNotify = n
+            Notify("Dodge: " .. reason, 1)
+        end
+    end
+end
+
+local function predictTick()
+    if not predict.enabled or not root then return end
+    local threats = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            local h = p.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and h and h.Health > 0 then
+                pushHistory(p, hrp)
+                local dist = (hrp.Position - root.Position).Magnitude
+                if dist <= predict.dodgeRange then
+                    local score = predict.threatScoreEnabled and scoreThreat(hrp) or (predict.dodgeRange - dist)
+                    local prev = predictLastPos[p]
+                    predictLastPos[p] = hrp.Position
+                    local jumped = prev and (hrp.Position - prev).Magnitude
+                    if predict.detectTpEnabled and jumped and jumped > predict.tpThreshold then
+                        table.insert(threats, { player = p, hrp = hrp, score = score + 100, reason = "TP" })
+                    elseif predict.voidDetectEnabled then
+                        if hrp.AssemblyLinearVelocity.Magnitude > predict.voidVelocitySpike and dist < predict.voidProxThreshold * 3 then
+                            table.insert(threats, { player = p, hrp = hrp, score = score + 80, reason = "VoidSpam" })
+                        end
+                    end
+                    if predict.detectAccel then
+                        local rec = predict.predictTable[p]
+                        if rec then
+                            local dv = (hrp.AssemblyLinearVelocity - rec.lastVel).Magnitude
+                            if dv > predict.accelThreshold and dist < predict.dodgeRange * 0.6 then
+                                table.insert(threats, { player = p, hrp = hrp, score = score + 60, reason = "Accel" })
+                            end
+                        end
+                    end
+                    if predict.ignoreBait then
+                        if hrp.AssemblyLinearVelocity.Magnitude >= predict.stallThreshold or dist >= predict.dodgeRange * 0.5 then
+                            table.insert(threats, { player = p, hrp = hrp, score = score, reason = "Proximity" })
+                        end
+                    else
+                        table.insert(threats, { player = p, hrp = hrp, score = score, reason = "Proximity" })
+                    end
+                end
+            end
+        end
+    end
+    if #threats == 0 then return end
+    if predict.priorityMode == "Fastest" then
+        table.sort(threats, function(a, b) return a.hrp.AssemblyLinearVelocity.Magnitude > b.hrp.AssemblyLinearVelocity.Magnitude end)
+    elseif predict.priorityMode == "Random" then
+        local pick = threats[math.random(1, #threats)]
+        execDodge(pick.hrp, pick.reason)
+        return
+    else
+        table.sort(threats, function(a, b) return a.score > b.score end)
+    end
+    local top = threats[1]
+    if top then execDodge(top.hrp, top.reason) end
+end
+
+function startPredict()
+    stopPredict()
+    predict.enabled = true
+    predict.lastDodge = 0
+    predict.lastNotify = 0
+    predictLastPos = {}
+    predict.predictTable = {}
+    local evt = predict.multithreaded and RunService.Heartbeat or RunService.Stepped
+    predict._conn = evt:Connect(function() pcall(predictTick) end)
+end
+
+function stopPredict()
+    predict.enabled = false
+    if predict._conn then pcall(function() predict._conn:Disconnect() end); predict._conn = nil end
+end
+
+-- ================ anti-aim ================
+local antiAim = {
+    enabled = false, mode = "Spin", speed = 3000, jitter = 45,
+    pitchLock = false, rollBot = false, rollSpeed = 360,
+}
+local aaConn
+
+local function aaTick()
+    if not antiAim.enabled or not root then return end
+    local now = tick()
+    local t = now * antiAim.speed
+    local yaw, pitch, roll = 0, 0, 0
+    local m = antiAim.mode
+    if m == "Spin" then
+        yaw = t % 360
+    elseif m == "Jitter" then
+        yaw = math.sin(now * antiAim.speed) * antiAim.jitter
+        pitch = math.cos(now * antiAim.speed * 0.7) * antiAim.jitter * 0.5
+    elseif m == "Random" then
+        if math.random() < 0.3 then
+            yaw = math.random(-180, 180)
+            pitch = math.random(-60, 60)
+        end
+    elseif m == "Static" then
+        yaw = 180
+    elseif m == "Desync" then
+        yaw = math.sin(now * antiAim.speed) * 180
+        pitch = math.cos(now * antiAim.speed * 0.5) * 45
+    end
+    if antiAim.pitchLock then pitch = -90 end
+    if antiAim.rollBot then roll = (now * antiAim.rollSpeed) % 360 end
+    root.CFrame = CFrame.new(root.Position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), math.rad(roll))
+end
+
+function startAntiAim()
+    stopAntiAim()
+    antiAim.enabled = true
+    aaConn = RunService.RenderStepped:Connect(function() pcall(aaTick) end)
+end
+
+function stopAntiAim()
+    antiAim.enabled = false
+    if aaConn then pcall(function() aaConn:Disconnect() end); aaConn = nil end
+end
+
+-- ================ tabs ================
+local Tabs = {
+    FastMelee  = Window:AddTab("Fast Melee", "sword"),
+    VoidSpam   = Window:AddTab("Void Spam", "skull"),
+    Orbit      = Window:AddTab("Orbit", "orbit"),
+    Bait       = Window:AddTab("Bait", "eye"),
+    AntiBait   = Window:AddTab("Anti-Bait", "shield"),
+    FreezeBait = Window:AddTab("Freeze Bait", "snowflake"),
+    Prediction = Window:AddTab("Prediction", "radar"),
+    AntiAim    = Window:AddTab("Anti-Aim", "rotate-cw"),
+    Settings   = Window:AddTab("Settings", "settings"),
+}
+
+-- ---- Fast Melee ----
+local FML = Tabs.FastMelee:AddLeftGroupbox("Cooldown Patch")
+FML:AddToggle("FastMeleeToggle", { Text = "Enable Fast Melee", Default = false,
+    Callback = function(v)
+        fastMelee.enabled = v
+        if v then pcall(fastMeleeApply) else pcall(fastMeleeRevert) end
+    end })
+FML:AddToggle("FastMeleePatchMelee", { Text = "Patch Melee Cooldowns", Default = true,
+    Callback = function(v) fastMelee.patchMelee = v; if fastMelee.enabled then pcall(fastMeleeApply) end end })
+FML:AddToggle("FastMeleePatchGuns", { Text = "Patch Gun Stats", Default = true,
+    Callback = function(v) fastMelee.patchGuns = v; if fastMelee.enabled then pcall(fastMeleeApply) end end })
+FML:AddSlider("FastMeleeCooldown", { Text = "Cooldown Value", Min = 0, Max = 1, Default = 0.001, Rounding = 4,
+    Callback = function(v) fastMelee.cooldown = v; if fastMelee.enabled then pcall(fastMeleeApply) end end })
+
+-- ---- Void Spam ----
+local VSL  = Tabs.VoidSpam:AddLeftGroupbox("Void Spam")
+local VSR  = Tabs.VoidSpam:AddRightGroupbox("Method Tuning")
+local VSL2 = Tabs.VoidSpam:AddLeftGroupbox("Safety")
+local VSR2 = Tabs.VoidSpam:AddRightGroupbox("Offsets & Spread")
+local VSL3 = Tabs.VoidSpam:AddLeftGroupbox("Tick Mode")
+local VSR3 = Tabs.VoidSpam:AddRightGroupbox("Advanced")
+local VSH  = Tabs.VoidSpam:AddLeftGroupbox("Void Helper")
+
+VSL:AddToggle("VoidSpamToggle", { Text = "Enable Void Spam", Default = false,
+    Callback = function(v) voidSpam.enabled = v; if v then startVoidSpam() else stopVoidSpam() end end })
+VSL:AddDropdown("VoidSpamMethod", { Text = "Method", Default = "Quantum", Multi = false,
+    Values = {"Quantum","Scatter","Grid","Sphere","Chaos","Line","Fibonacci","Helix","DualBand"},
+    Callback = function(v) voidSpam.method = v end })
+VSL:AddSlider("VoidSpamRate", { Text = "Rate (Hz)", Min = 1, Max = 1000, Default = 120, Rounding = 0,
+    Callback = function(v) voidSpam.rateHz = v end })
+VSL:AddSlider("VoidSpamAmplitude", { Text = "Amplitude", Min = 1e6, Max = 1e15, Default = 1e12, Rounding = 0,
+    Callback = function(v) voidSpam.amplitude = v end })
+VSL:AddSlider("VoidSpamRadius", { Text = "Radius", Min = 1e6, Max = 1e15, Default = 1e12, Rounding = 0,
+    Callback = function(v) voidSpam.radius = v end })
+
+VSR:AddSlider("VoidSpamYMin", { Text = "Y Min", Min = -1e15, Max = 0, Default = -1e12, Rounding = 0, Callback = function(v) voidSpam.yMin = v end })
+VSR:AddSlider("VoidSpamYMax", { Text = "Y Max", Min = 0, Max = 1e15, Default = 1e12, Rounding = 0, Callback = function(v) voidSpam.yMax = v end })
+VSR:AddSlider("VoidSpamFibCount", { Text = "Fibonacci Count", Min = 16, Max = 2000, Default = 200, Rounding = 0, Callback = function(v) voidSpam.fibCount = v end })
+VSR:AddSlider("VoidSpamGridStep", { Text = "Grid Step", Min = 1e6, Max = 1e14, Default = 1e11, Rounding = 0, Callback = function(v) voidSpam.gridStep = v end })
+VSR:AddSlider("VoidSpamGridExtent", { Text = "Grid Extent", Min = 1, Max = 50, Default = 5, Rounding = 0, Callback = function(v) voidSpam.gridExtent = v end })
+VSR:AddSlider("VoidSpamLineAngle", { Text = "Line Angle", Min = 0, Max = 360, Default = 45, Rounding = 0, Callback = function(v) voidSpam.lineAngle = v end })
+VSR:AddSlider("VoidSpamLineLen", { Text = "Line Length", Min = 1e6, Max = 1e15, Default = 1e12, Rounding = 0, Callback = function(v) voidSpam.lineLen = v end })
+
+VSL2:AddToggle("VoidSpamJitter", { Text = "Jitter", Default = true, Callback = function(v) voidSpam.jitter = v end })
+VSL2:AddSlider("VoidSpamJitterAmp", { Text = "Jitter Amp", Min = 1e5, Max = 1e13, Default = 5e11, Rounding = 0, Callback = function(v) voidSpam.jitterAmp = v end })
+VSL2:AddToggle("VoidSpamRandomize", { Text = "Randomize Each Tick", Default = true, Callback = function(v) voidSpam.randomizeEachTick = v end })
+VSL2:AddToggle("VoidSpamStopOnDmg", { Text = "Stop on Damage", Default = false, Callback = function(v) voidSpam.stopOnDamage = v end })
+VSL2:AddToggle("VoidSpamAutoReenable", { Text = "Auto Re-enable", Default = false, Callback = function(v) voidSpam.autoReenable = v end })
+VSL2:AddToggle("VoidSpamClampY", { Text = "Clamp Y", Default = true, Callback = function(v) voidSpam.clampY = v end })
+VSL2:AddSlider("VoidSpamClampAbs", { Text = "Clamp Abs Y", Min = 1e6, Max = 1e15, Default = 9e14, Rounding = 0, Callback = function(v) voidSpam.clampYAbs = v end })
+
+VSR2:AddSlider("VoidSpamOffX", { Text = "Offset X", Min = -1e14, Max = 1e14, Default = 0, Rounding = 0, Callback = function(v) voidSpam.offsetX = v end })
+VSR2:AddSlider("VoidSpamOffY", { Text = "Offset Y", Min = -1e14, Max = 1e14, Default = 0, Rounding = 0, Callback = function(v) voidSpam.offsetY = v end })
+VSR2:AddSlider("VoidSpamOffZ", { Text = "Offset Z", Min = -1e14, Max = 1e14, Default = 0, Rounding = 0, Callback = function(v) voidSpam.offsetZ = v end })
+VSR2:AddSlider("VoidSpamSpreadX", { Text = "Spread X", Min = 0, Max = 10, Default = 1, Rounding = 2, Callback = function(v) voidSpam.spreadX = v end })
+VSR2:AddSlider("VoidSpamSpreadY", { Text = "Spread Y", Min = 0, Max = 10, Default = 1, Rounding = 2, Callback = function(v) voidSpam.spreadY = v end })
+VSR2:AddSlider("VoidSpamSpreadZ", { Text = "Spread Z", Min = 0, Max = 10, Default = 1, Rounding = 2, Callback = function(v) voidSpam.spreadZ = v end })
+VSR2:AddToggle("VoidSpamAxisX", { Text = "Axis X", Default = true, Callback = function(v) voidSpam.axisX = v end })
+VSR2:AddToggle("VoidSpamAxisY", { Text = "Axis Y", Default = true, Callback = function(v) voidSpam.axisY = v end })
+VSR2:AddToggle("VoidSpamAxisZ", { Text = "Axis Z", Default = true, Callback = function(v) voidSpam.axisZ = v end })
+VSR2:AddToggle("VoidSpamPreserveY", { Text = "Preserve Y", Default = false, Callback = function(v) voidSpam.preserveY = v end })
+
+VSL3:AddDropdown("VoidSpamTickMode", { Text = "Tick Mode", Default = "Static", Multi = false,
+    Values = {"Static","Pulse","Anchor","Rebound","Interp","Silent"},
+    Callback = function(v) voidSpam.tickMode = v end })
+VSL3:AddSlider("VoidSpamPointsPerTick", { Text = "Points Per Tick", Min = 1, Max = 20, Default = 1, Rounding = 0,
+    Callback = function(v) voidSpam.pointsPerTick = v end })
+VSL3:AddSlider("VoidSpamAnchorFrames", { Text = "Anchor Frames", Min = 1, Max = 30, Default = 3, Rounding = 0,
+    Callback = function(v) voidSpam.anchorFrames = v end })
+VSL3:AddSlider("VoidSpamReboundBox", { Text = "Rebound Box Size", Min = 1e6, Max = 1e14, Default = 5e11, Rounding = 0,
+    Callback = function(v) voidSpam.reboundBox = v end })
+VSL3:AddSlider("VoidSpamInterpTime", { Text = "Interp Time (s)", Min = 0.005, Max = 0.5, Default = 0.05, Rounding = 3,
+    Callback = function(v) voidSpam.interpTime = v end })
+
+VSR3:AddToggle("VoidSpamDetectLockout", { Text = "Server Correction Lockout", Default = false,
+    Callback = function(v) voidSpam.detectLockout = v end })
+VSR3:AddSlider("VoidSpamLockoutThreshold", { Text = "Lockout Threshold", Min = 3, Max = 50, Default = 10, Rounding = 0,
+    Callback = function(v) voidSpam.lockoutThreshold = v end })
+VSR3:AddSlider("VoidSpamLockoutWindow", { Text = "Lockout Window (s)", Min = 0.5, Max = 10, Default = 2.0, Rounding = 1,
+    Callback = function(v) voidSpam.lockoutWindow = v end })
+VSR3:AddToggle("VoidSpamOrbitCombo", { Text = "Orbit Offset Combo", Default = false,
+    Callback = function(v) voidSpam.orbitCombo = v end })
+VSR3:AddSlider("VoidSpamOrbitComboRadius", { Text = "Orbit Radius", Min = 1, Max = 200, Default = 20, Rounding = 0,
+    Callback = function(v) voidSpam.orbitComboRadius = v end })
+VSR3:AddSlider("VoidSpamOrbitComboSpeed", { Text = "Orbit Speed (deg/s)", Min = 1, Max = 720, Default = 90, Rounding = 0,
+    Callback = function(v) voidSpam.orbitComboSpeed = v end })
+
+VSH:AddToggle("VSHelperToggle", { Text = "Enable Void Helper", Default = false,
+    Callback = function(v) vsHelper.enabled = v; if v then startVSHelper() else stopVSHelper() end end })
+VSH:AddToggle("VSHelperAdaptRate", { Text = "Adapt Rate", Default = true, Callback = function(v) vsHelper.adaptRate = v end })
+VSH:AddSlider("VSHelperRateMin", { Text = "Rate Min", Min = 1, Max = 1000, Default = 60, Rounding = 0, Callback = function(v) vsHelper.rateMin = v end })
+VSH:AddSlider("VSHelperRateMax", { Text = "Rate Max", Min = 1, Max = 1000, Default = 400, Rounding = 0, Callback = function(v) vsHelper.rateMax = v end })
+VSH:AddToggle("VSHelperAdaptAmp", { Text = "Adapt Amplitude", Default = true, Callback = function(v) vsHelper.adaptAmp = v end })
+VSH:AddSlider("VSHelperAmpScale", { Text = "Amp Scale", Min = 1, Max = 3, Default = 1.3, Rounding = 2, Callback = function(v) vsHelper.ampScale = v end })
+VSH:AddToggle("VSHelperReactDmg", { Text = "React to Damage", Default = true, Callback = function(v) vsHelper.reactToDamage = v end })
+VSH:AddToggle("VSHelperDodgeDmg", { Text = "Dodge on Damage", Default = true, Callback = function(v) vsHelper.dodgeOnDamage = v end })
+VSH:AddSlider("VSHelperDodgeDist", { Text = "Dodge Dist", Min = 1, Max = 200, Default = 30, Rounding = 0, Callback = function(v) vsHelper.dodgeDist = v end })
+VSH:AddToggle("VSHelperReactVel", { Text = "React to Velocity", Default = true, Callback = function(v) vsHelper.reactToVelocity = v end })
+VSH:AddSlider("VSHelperVelThresh", { Text = "Vel Threshold", Min = 1, Max = 500, Default = 40, Rounding = 0, Callback = function(v) vsHelper.velThreshold = v end })
+VSH:AddToggle("VSHelperAutoClamp", { Text = "Auto Clamp Y", Default = true, Callback = function(v) vsHelper.autoClampY = v end })
+VSH:AddSlider("VSHelperYCap", { Text = "Y Abs Cap", Min = 1e6, Max = 1e15, Default = 1e14, Rounding = 0, Callback = function(v) vsHelper.yAbsCap = v end })
+VSH:AddSlider("VSHelperCooldown", { Text = "Cooldown", Min = 0.05, Max = 5, Default = 0.5, Rounding = 2, Callback = function(v) vsHelper.cooldown = v end })
+
+-- ---- Orbit ----
+local ORL  = Tabs.Orbit:AddLeftGroupbox("Orbit")
+local ORR  = Tabs.Orbit:AddRightGroupbox("Motion")
+local ORL2 = Tabs.Orbit:AddLeftGroupbox("Offsets")
+local ORR2 = Tabs.Orbit:AddRightGroupbox("Pattern Params")
+local ORL3 = Tabs.Orbit:AddLeftGroupbox("Advanced")
+local ORR3 = Tabs.Orbit:AddRightGroupbox("Combo")
+
+ORL:AddToggle("OrbitToggle", { Text = "Enable Orbit", Default = false,
+    Callback = function(v) orbit.enabled = v; if v then startOrbit() else stopOrbit() end end })
+ORL:AddDropdown("OrbitTarget", { Text = "Target", Default = "Closest", Multi = false,
+    Values = {"Closest","Farthest","Random","Mouse"}, Callback = function(v) orbit.target = v end })
+ORL:AddDropdown("OrbitMode", { Text = "Pattern", Default = "Circle", Multi = false,
+    Values = {"Circle","Figure8","Spiral","Lissajous","Pendulum","Zigzag","Helix"},
+    Callback = function(v) orbit.mode = v end })
+ORL:AddDropdown("OrbitAxis", { Text = "Axis", Default = "XZ", Multi = false,
+    Values = {"XZ","XY","YZ"}, Callback = function(v) orbit.axis = v end })
+ORL:AddDropdown("OrbitEasing", { Text = "Easing", Default = "smooth", Multi = false,
+    Values = {"linear","smooth","sine"}, Callback = function(v) orbit.easing = v end })
+ORL:AddSlider("OrbitSpeed", { Text = "Speed (deg/s)", Min = 1, Max = 2000, Default = 90, Rounding = 0, Callback = function(v) orbit.speed = v end })
+ORL:AddSlider("OrbitRadius", { Text = "Radius", Min = 1, Max = 500, Default = 8, Rounding = 1, Callback = function(v) orbit.radius = v end })
+ORL:AddSlider("OrbitHeight", { Text = "Height", Min = -100, Max = 100, Default = 0, Rounding = 1, Callback = function(v) orbit.height = v end })
+ORL:AddSlider("OrbitLerp", { Text = "Lerp", Min = 0.01, Max = 1, Default = 0.3, Rounding = 2, Callback = function(v) orbit.lerp = v end })
+ORL:AddToggle("OrbitReverse", { Text = "Reverse", Default = false, Callback = function(v) orbit.reverse = v end })
+ORL:AddToggle("OrbitFace", { Text = "Face Target", Default = true, Callback = function(v) orbit.face = v end })
+ORL:AddToggle("OrbitPredictive", { Text = "Predictive", Default = false, Callback = function(v) orbit.predictive = v end })
+ORL:AddSlider("OrbitLead", { Text = "Lead Time", Min = 0, Max = 1, Default = 0.2, Rounding = 2, Callback = function(v) orbit.lead = v end })
+
+ORR:AddToggle("OrbitRandomRadius", { Text = "Random Radius", Default = false, Callback = function(v) orbit.randomRadius = v end })
+ORR:AddSlider("OrbitRMin", { Text = "R Min", Min = 1, Max = 500, Default = 5, Rounding = 1, Callback = function(v) orbit.rMin = v end })
+ORR:AddSlider("OrbitRMax", { Text = "R Max", Min = 1, Max = 500, Default = 20, Rounding = 1, Callback = function(v) orbit.rMax = v end })
+ORR:AddToggle("OrbitSpeedPulse", { Text = "Speed Pulse", Default = false, Callback = function(v) orbit.speedPulse = v end })
+ORR:AddSlider("OrbitSpeedPulseAmp", { Text = "Pulse Amp", Min = 0, Max = 2, Default = 0.5, Rounding = 2, Callback = function(v) orbit.speedPulseAmp = v end })
+ORR:AddSlider("OrbitSpeedPulseHz", { Text = "Pulse Hz", Min = 0.1, Max = 10, Default = 1, Rounding = 2, Callback = function(v) orbit.speedPulseHz = v end })
+ORR:AddToggle("OrbitHeightOsc", { Text = "Height Oscillate", Default = false, Callback = function(v) orbit.heightOsc = v end })
+ORR:AddSlider("OrbitHeightOscAmp", { Text = "Height Amp", Min = 0, Max = 50, Default = 5, Rounding = 1, Callback = function(v) orbit.heightOscAmp = v end })
+ORR:AddSlider("OrbitHeightOscHz", { Text = "Height Hz", Min = 0.1, Max = 10, Default = 2, Rounding = 2, Callback = function(v) orbit.heightOscHz = v end })
+ORR:AddToggle("OrbitDistPulse", { Text = "Distance Pulse", Default = false, Callback = function(v) orbit.distPulse = v end })
+ORR:AddSlider("OrbitDistPulseAmp", { Text = "Dist Amp", Min = 0, Max = 50, Default = 4, Rounding = 1, Callback = function(v) orbit.distPulseAmp = v end })
+ORR:AddSlider("OrbitDistPulseHz", { Text = "Dist Hz", Min = 0.1, Max = 10, Default = 1, Rounding = 2, Callback = function(v) orbit.distPulseHz = v end })
+
+ORL2:AddSlider("OrbitOffX", { Text = "Offset X", Min = -100, Max = 100, Default = 0, Rounding = 1, Callback = function(v) orbit.offX = v end })
+ORL2:AddSlider("OrbitOffY", { Text = "Offset Y", Min = -100, Max = 100, Default = 0, Rounding = 1, Callback = function(v) orbit.offY = v end })
+ORL2:AddSlider("OrbitOffZ", { Text = "Offset Z", Min = -100, Max = 100, Default = 0, Rounding = 1, Callback = function(v) orbit.offZ = v end })
+ORL2:AddSlider("OrbitYawOff", { Text = "Yaw Offset", Min = -180, Max = 180, Default = 0, Rounding = 0, Callback = function(v) orbit.yawOff = v end })
+ORL2:AddSlider("OrbitPitchOff", { Text = "Pitch Offset", Min = -90, Max = 90, Default = 0, Rounding = 0, Callback = function(v) orbit.pitchOff = v end })
+
+ORR2:AddSlider("OrbitZigAmp", { Text = "Zigzag Amp", Min = 0, Max = 50, Default = 3, Rounding = 1, Callback = function(v) orbit.zigAmp = v end })
+ORR2:AddSlider("OrbitZigHz", { Text = "Zigzag Hz", Min = 0.1, Max = 20, Default = 4, Rounding = 2, Callback = function(v) orbit.zigHz = v end })
+ORR2:AddSlider("OrbitLissA", { Text = "Liss A", Min = 1, Max = 10, Default = 3, Rounding = 0, Callback = function(v) orbit.lissA = v end })
+ORR2:AddSlider("OrbitLissB", { Text = "Liss B", Min = 1, Max = 10, Default = 2, Rounding = 0, Callback = function(v) orbit.lissB = v end })
+ORR2:AddSlider("OrbitLissDelta", { Text = "Liss Delta", Min = 0, Max = 6.28, Default = 1.57, Rounding = 2, Callback = function(v) orbit.lissDelta = v end })
+ORR2:AddSlider("OrbitSpiralGrow", { Text = "Spiral Growth", Min = 0, Max = 10, Default = 0.5, Rounding = 2, Callback = function(v) orbit.spiralGrow = v end })
+ORR2:AddSlider("OrbitHelixPitch", { Text = "Helix Pitch", Min = 0, Max = 10, Default = 1.5, Rounding = 2, Callback = function(v) orbit.helixPitch = v end })
+ORR2:AddSlider("OrbitPendAmp", { Text = "Pendulum Amp", Min = 1, Max = 90, Default = 45, Rounding = 0, Callback = function(v) orbit.pendulumAmp = v end })
+ORR2:AddSlider("OrbitPendHz", { Text = "Pendulum Hz", Min = 0.1, Max = 10, Default = 1, Rounding = 2, Callback = function(v) orbit.pendulumHz = v end })
+
+ORL3:AddToggle("OrbitAutoScale", { Text = "Auto Scale Radius By Speed", Default = false, Callback = function(v) orbit.autoScale = v end })
+ORL3:AddSlider("OrbitAutoScaleMult", { Text = "Scale Mult", Min = 0, Max = 0.2, Default = 0.02, Rounding = 3, Callback = function(v) orbit.autoScaleMult = v end })
+ORL3:AddToggle("OrbitRandomHeightPerRev", { Text = "Random Height Per Revolution", Default = false, Callback = function(v) orbit.randomHeightPerRev = v end })
+ORL3:AddSlider("OrbitRandomHeightRange", { Text = "Height Range", Min = 1, Max = 200, Default = 20, Rounding = 0, Callback = function(v) orbit.randomHeightRange = v end })
+ORL3:AddToggle("OrbitLockFacingToVel", { Text = "Lock Facing To Target Velocity", Default = false, Callback = function(v) orbit.lockFacingToVel = v end })
+
+ORR3:AddToggle("OrbitDual", { Text = "Dual Target Blend", Default = false, Callback = function(v) orbit.dual = v end })
+ORR3:AddSlider("OrbitDualBlend", { Text = "Blend (0 = primary, 1 = secondary)", Min = 0, Max = 1, Default = 0.4, Rounding = 2, Callback = function(v) orbit.dualBlend = v end })
+ORR3:AddToggle("OrbitVelocityInject", { Text = "Inject Velocity Per Frame", Default = false, Callback = function(v) orbit.velocityInject = v end })
+ORR3:AddSlider("OrbitVelocityInjectMag", { Text = "Inject Magnitude", Min = 10, Max = 1000, Default = 150, Rounding = 0, Callback = function(v) orbit.velocityInjectMag = v end })
+
+-- ---- Bait ----
+local BTL = Tabs.Bait:AddLeftGroupbox("Bait")
+BTL:AddToggle("BaitToggle", { Text = "Enable Bait", Default = false,
+    Callback = function(v) bait.enabled = v; if v then startBait() else stopBait() end end })
+BTL:AddDropdown("BaitMode", { Text = "Mode", Default = "Stall", Multi = false,
+    Values = {"Stall","FakeLock","Pulse","FreezeSnap","Lure"}, Callback = function(v) bait.mode = v end })
+BTL:AddSlider("BaitStallTime", { Text = "Stall Time", Min = 0.01, Max = 1, Default = 0.08, Rounding = 3, Callback = function(v) bait.stallTime = v end })
+BTL:AddSlider("BaitStallChance", { Text = "Stall Chance", Min = 0, Max = 1, Default = 0.4, Rounding = 2, Callback = function(v) bait.stallChance = v end })
+BTL:AddSlider("BaitFakeLockTime", { Text = "Fake Lock Time", Min = 0.01, Max = 1, Default = 0.06, Rounding = 3, Callback = function(v) bait.fakeLockTime = v end })
+BTL:AddSlider("BaitPulseHz", { Text = "Pulse Hz", Min = 0.5, Max = 30, Default = 4, Rounding = 1, Callback = function(v) bait.pulseHz = v end })
+BTL:AddSlider("BaitPulseFreeze", { Text = "Pulse Freeze", Min = 0.01, Max = 0.5, Default = 0.03, Rounding = 3, Callback = function(v) bait.pulseFreezeTime = v end })
+BTL:AddSlider("BaitFreezeTime", { Text = "Freeze Time", Min = 0.01, Max = 1, Default = 0.05, Rounding = 3, Callback = function(v) bait.freezeTime = v end })
+BTL:AddSlider("BaitSnapDist", { Text = "Snap Distance", Min = 1, Max = 500, Default = 40, Rounding = 0, Callback = function(v) bait.snapDistance = v end })
+BTL:AddSlider("BaitLureMove", { Text = "Lure Move", Min = 1, Max = 100, Default = 6, Rounding = 1, Callback = function(v) bait.lureMove = v end })
+BTL:AddSlider("BaitLureHold", { Text = "Lure Hold", Min = 0.01, Max = 2, Default = 0.15, Rounding = 2, Callback = function(v) bait.lureHold = v end })
+BTL:AddToggle("BaitAutoEvade", { Text = "Auto Evade", Default = true, Callback = function(v) bait.autoEvade = v end })
+BTL:AddDropdown("BaitEvadeTrigger", { Text = "Evade Trigger", Default = "Attack", Multi = false,
+    Values = {"Attack","Proximity","Both"}, Callback = function(v) bait.evadeTrigger = v end })
+BTL:AddSlider("BaitEvadeDist", { Text = "Evade Distance", Min = 1, Max = 200, Default = 25, Rounding = 0, Callback = function(v) bait.evadeDist = v end })
+BTL:AddSlider("BaitEvadeCooldown", { Text = "Evade Cooldown", Min = 0.1, Max = 5, Default = 0.4, Rounding = 2, Callback = function(v) bait.evadeCooldown = v end })
+BTL:AddSlider("BaitEvadePower", { Text = "Evade Power", Min = 1, Max = 300, Default = 80, Rounding = 0, Callback = function(v) bait.evadePower = v end })
+BTL:AddToggle("BaitNotify", { Text = "Notify on Evade", Default = true, Callback = function(v) bait.notifyLabel = v end })
+
+-- ---- Anti-Bait ----
+local ABL = Tabs.AntiBait:AddLeftGroupbox("Anti-Bait")
+ABL:AddToggle("AntiBaitToggle", { Text = "Enable Anti-Bait", Default = false,
+    Callback = function(v) antiBait.enabled = v; if v then startAntiBait() else stopAntiBait() end end })
+ABL:AddSlider("AntiBaitDetectRadius", { Text = "Detect Radius", Min = 10, Max = 500, Default = 60, Rounding = 0, Callback = function(v) antiBait.detectRadius = v end })
+ABL:AddToggle("AntiBaitDetectCommit", { Text = "Detect Attack Commit", Default = true, Callback = function(v) antiBait.detectCommit = v end })
+ABL:AddSlider("AntiBaitCommitDot", { Text = "Commit Dot", Min = 0.5, Max = 1, Default = 0.85, Rounding = 2, Callback = function(v) antiBait.commitDot = v end })
+ABL:AddSlider("AntiBaitCommitDist", { Text = "Commit Distance", Min = 10, Max = 500, Default = 80, Rounding = 0, Callback = function(v) antiBait.commitDist = v end })
+ABL:AddSlider("AntiBaitDodgeDist", { Text = "Dodge Distance", Min = 1, Max = 300, Default = 60, Rounding = 0, Callback = function(v) antiBait.dodgeDist = v end })
+ABL:AddSlider("AntiBaitCooldown", { Text = "Dodge Cooldown", Min = 0.01, Max = 2, Default = 0.05, Rounding = 2, Callback = function(v) antiBait.dodgeCooldown = v end })
+ABL:AddToggle("AntiBaitEvadeBait", { Text = "Dodge Enemy Bait", Default = true, Callback = function(v) antiBait.evadeBait = v end })
+ABL:AddSlider("AntiBaitStallThresh", { Text = "Stall Threshold", Min = 0, Max = 5, Default = 0.15, Rounding = 2, Callback = function(v) antiBait.stallThreshold = v end })
+ABL:AddToggle("AntiBaitNotify", { Text = "Notify", Default = false, Callback = function(v) antiBait.notify = v end })
+
+-- ---- Freeze Bait ----
+local FBL = Tabs.FreezeBait:AddLeftGroupbox("Freeze Bait")
+FBL:AddToggle("FreezeBaitToggle", { Text = "Enable Freeze Bait", Default = false,
+    Callback = function(v) freezeBait.enabled = v; if v then startFreezeBait() else stopFreezeBait() end end })
+FBL:AddSlider("FreezeBaitTime", { Text = "Freeze Time", Min = 0.01, Max = 2, Default = 0.1, Rounding = 3, Callback = function(v) freezeBait.freezeTime = v end })
+FBL:AddSlider("FreezeBaitInterval", { Text = "Interval", Min = 0.05, Max = 5, Default = 0.5, Rounding = 2, Callback = function(v) freezeBait.freezeInterval = v end })
+FBL:AddSlider("FreezeBaitSnapDist", { Text = "Snap Distance", Min = 1, Max = 500, Default = 60, Rounding = 0, Callback = function(v) freezeBait.snapDist = v end })
+FBL:AddSlider("FreezeBaitSnapVert", { Text = "Snap Vertical", Min = 0, Max = 200, Default = 20, Rounding = 0, Callback = function(v) freezeBait.snapVertical = v end })
+FBL:AddToggle("FreezeBaitRandomDir", { Text = "Random Direction", Default = true, Callback = function(v) freezeBait.randomDir = v end })
+FBL:AddToggle("FreezeBaitLockCF", { Text = "Lock CFrame", Default = true, Callback = function(v) freezeBait.lockCFrame = v end })
+FBL:AddToggle("FreezeBaitOnAttack", { Text = "Only on Attack", Default = false, Callback = function(v) freezeBait.onAttackOnly = v end })
+FBL:AddSlider("FreezeBaitAttackRange", { Text = "Attack Detect Range", Min = 1, Max = 200, Default = 30, Rounding = 0, Callback = function(v) freezeBait.attackDetectRange = v end })
+FBL:AddToggle("FreezeBaitJitter", { Text = "Jitter During Freeze", Default = false, Callback = function(v) freezeBait.jitterDuring = v end })
+FBL:AddSlider("FreezeBaitJitterAmp", { Text = "Jitter Amp", Min = 0, Max = 50, Default = 5, Rounding = 1, Callback = function(v) freezeBait.jitterAmp = v end })
+FBL:AddToggle("FreezeBaitNotify", { Text = "Notify", Default = true, Callback = function(v) freezeBait.notify = v end })
+
+-- ---- Prediction ----
+local PRL  = Tabs.Prediction:AddLeftGroupbox("Prediction")
+local PRR  = Tabs.Prediction:AddRightGroupbox("Detection")
+local PRL2 = Tabs.Prediction:AddLeftGroupbox("Dodge Tuning")
+
+PRL:AddToggle("PredictToggle", { Text = "Enable Prediction", Default = false,
+    Callback = function(v) if v then startPredict() else stopPredict() end end })
+PRL:AddDropdown("PredictMethod", { Text = "Dodge Method", Default = "Trajectory", Multi = false,
+    Values = {"Trajectory","RadialBurst","PredictiveOrbit","Layered","Random","Silent","CounterDive","Slingshot"},
+    Callback = function(v) predict.method = v end })
+PRL:AddDropdown("PredictPriority", { Text = "Priority", Default = "Closest", Multi = false,
+    Values = {"Closest","Attacking","Fastest","Random"}, Callback = function(v) predict.priorityMode = v end })
+PRL:AddSlider("PredictDodgeDist", { Text = "Dodge Distance", Min = 5, Max = 300, Default = 40, Rounding = 0, Callback = function(v) predict.dodgeDist = v end })
+PRL:AddSlider("PredictDodgeRange", { Text = "React Range", Min = 10, Max = 500, Default = 80, Rounding = 0, Callback = function(v) predict.dodgeRange = v end })
+PRL:AddSlider("PredictDodgeCD", { Text = "Dodge Cooldown", Min = 0.01, Max = 2, Default = 0.06, Rounding = 2, Callback = function(v) predict.dodgeCooldown = v end })
+PRL:AddSlider("PredictLead", { Text = "Predict Lead", Min = 0, Max = 1, Default = 0.15, Rounding = 2, Callback = function(v) predict.predictLead = v end })
+PRL:AddSlider("PredictLayers", { Text = "Layers", Min = 1, Max = 8, Default = 3, Rounding = 0, Callback = function(v) predict.reactiveLayers = v end })
+PRL:AddSlider("PredictLayerGap", { Text = "Layer Gap", Min = 0.005, Max = 0.2, Default = 0.02, Rounding = 3, Callback = function(v) predict.layerGap = v end })
+PRL:AddToggle("PredictRandomDir", { Text = "Randomize Direction", Default = true, Callback = function(v) predict.randomizeDir = v end })
+PRL:AddToggle("PredictPerp", { Text = "Prefer Perpendicular", Default = true, Callback = function(v) predict.preferPerpendicular = v end })
+PRL:AddToggle("PredictVertSpike", { Text = "Vertical Spike", Default = true, Callback = function(v) predict.verticalSpike = v end })
+PRL:AddSlider("PredictVertAmp", { Text = "Vertical Amp", Min = 0, Max = 100, Default = 15, Rounding = 1, Callback = function(v) predict.verticalSpikeAmp = v end })
+PRL:AddToggle("PredictNotify", { Text = "Notify on Dodge", Default = false, Callback = function(v) predict.notify = v end })
+PRL:AddToggle("PredictMultithread", { Text = "Heartbeat Loop", Default = true, Callback = function(v) predict.multithreaded = v end })
+
+PRR:AddToggle("PredictDetectTp", { Text = "Detect Teleport", Default = true, Callback = function(v) predict.detectTpEnabled = v end })
+PRR:AddSlider("PredictTpThreshold", { Text = "TP Threshold (studs)", Min = 5, Max = 200, Default = 30, Rounding = 0, Callback = function(v) predict.tpThreshold = v end })
+PRR:AddSlider("PredictTpWindow", { Text = "History Window", Min = 0.1, Max = 2, Default = 0.4, Rounding = 2, Callback = function(v) predict.tpWindow = v end })
+PRR:AddToggle("PredictDetectVoid", { Text = "Detect Void Spam", Default = true, Callback = function(v) predict.voidDetectEnabled = v end })
+PRR:AddSlider("PredictVoidProx", { Text = "Void Prox", Min = 5, Max = 200, Default = 15, Rounding = 0, Callback = function(v) predict.voidProxThreshold = v end })
+PRR:AddSlider("PredictVoidVel", { Text = "Void Vel Spike", Min = 50, Max = 5000, Default = 200, Rounding = 0, Callback = function(v) predict.voidVelocitySpike = v end })
+PRR:AddToggle("PredictDetectAccel", { Text = "Detect Acceleration", Default = true, Callback = function(v) predict.detectAccel = v end })
+PRR:AddSlider("PredictAccelThresh", { Text = "Accel Threshold", Min = 50, Max = 5000, Default = 500, Rounding = 0, Callback = function(v) predict.accelThreshold = v end })
+PRR:AddToggle("PredictIgnoreBait", { Text = "Ignore Bait Posture", Default = true, Callback = function(v) predict.ignoreBait = v end })
+PRR:AddSlider("PredictStallThresh", { Text = "Bait Stall Thresh", Min = 0, Max = 20, Default = 2.0, Rounding = 1, Callback = function(v) predict.stallThreshold = v end })
+PRR:AddToggle("PredictThreatScore", { Text = "Threat Scoring", Default = true, Callback = function(v) predict.threatScoreEnabled = v end })
+PRR:AddSlider("PredictThreatRange", { Text = "Threat Range", Min = 20, Max = 500, Default = 120, Rounding = 0, Callback = function(v) predict.threatScoreRange = v end })
+PRR:AddToggle("PredictAimVector", { Text = "Aim Vector Detect", Default = true, Callback = function(v) predict.aimVectorDetect = v end })
+
+PRL2:AddButton("Clear History", function()
+    predict.predictTable = {}
+    predictLastPos = {}
+    Notify("Prediction history cleared", 2)
+end)
+
+-- ---- Anti-Aim ----
+local AAL = Tabs.AntiAim:AddLeftGroupbox("Anti-Aim")
+AAL:AddToggle("AAToggle", { Text = "Enable Anti-Aim", Default = false,
+    Callback = function(v) if v then startAntiAim() else stopAntiAim() end end })
+AAL:AddDropdown("AAMode", { Text = "Mode", Default = "Spin", Multi = false,
+    Values = {"Spin","Jitter","Random","Static","Desync"}, Callback = function(v) antiAim.mode = v end })
+AAL:AddSlider("AASpeed", { Text = "Speed", Min = 100, Max = 10000, Default = 3000, Rounding = 0, Callback = function(v) antiAim.speed = v end })
+AAL:AddSlider("AAJitter", { Text = "Jitter Amp", Min = 5, Max = 180, Default = 45, Rounding = 0, Callback = function(v) antiAim.jitter = v end })
+AAL:AddToggle("AAPitchLock", { Text = "Pitch Lock", Default = false, Callback = function(v) antiAim.pitchLock = v end })
+AAL:AddToggle("AARollBot", { Text = "Roll Bot", Default = false, Callback = function(v) antiAim.rollBot = v end })
+AAL:AddSlider("AARollSpeed", { Text = "Roll Speed", Min = 30, Max = 1440, Default = 360, Rounding = 0, Callback = function(v) antiAim.rollSpeed = v end })
+
+-- ---- Settings ----
+local MenuG = Tabs.Settings:AddLeftGroupbox("Menu")
+MenuG:AddButton("Load Preset", function()
+    voidSpam.enabled = true; vsHelper.enabled = true
+    orbit.enabled = true; bait.enabled = true
+    antiBait.enabled = true; freezeBait.enabled = true
+    predict.method = "Trajectory"
+    for _, n in ipairs({"VoidSpamToggle","VSHelperToggle","OrbitToggle","BaitToggle","AntiBaitToggle","FreezeBaitToggle","PredictToggle"}) do
+        if Toggles[n] then pcall(function() Toggles[n]:SetValue(true) end) end
+    end
+    pcall(startVoidSpam); pcall(startVSHelper); pcall(startOrbit)
+    pcall(startBait); pcall(startAntiBait); pcall(startFreezeBait); pcall(startPredict)
+    Notify("Preset Loaded", 3)
+end)
+MenuG:AddButton("Kill Every (Disable All)", function()
+    voidSpam.enabled = false; pcall(stopVoidSpam)
+    vsHelper.enabled = false; pcall(stopVSHelper)
+    orbit.enabled = false; pcall(stopOrbit)
+    bait.enabled = false; pcall(stopBait)
+    antiBait.enabled = false; pcall(stopAntiBait)
+    freezeBait.enabled = false; pcall(stopFreezeBait)
+    predict.enabled = false; pcall(stopPredict)
+    pcall(stopAntiAim)
+    if fastMelee.enabled then pcall(fastMeleeRevert) end
+    for _, n in ipairs({
+        "FastMeleeToggle","VoidSpamToggle","VSHelperToggle","OrbitToggle","BaitToggle",
+        "AntiBaitToggle","FreezeBaitToggle","PredictToggle","AAToggle"
+    }) do
+        if Toggles[n] then pcall(function() Toggles[n]:SetValue(false) end) end
+    end
+    Notify("KILL EVERYTHING", 3)
+end)
+MenuG:AddButton("Reload Character", function() if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end end)
+MenuG:AddButton("Rejoin Server", function() pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer) end) end)
+MenuG:AddButton("Server Hop", function()
+    pcall(function()
+        local Http = game:GetService("HttpService")
+        local TS = game:GetService("TeleportService")
+        local data = Http:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
+        for _, srv in ipairs(data.data) do
+            if srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
+                TS:TeleportToPlaceInstance(game.PlaceId, srv.id, LocalPlayer); break
+            end
+        end
+    end)
+end)
+MenuG:AddToggle("KeybindMenu", { Text = "Keybind Menu", Default = false, Callback = function(v)
+    pcall(function() if Library.KeybindFrame then Library.KeybindFrame.Visible = v end end)
+end })
+
+local UIGroup = Tabs.Settings:AddLeftGroupbox("UI")
+UIGroup:AddLabel("Menu Keybind"):AddKeyPicker("MenuKeybind", { Default = "RightShift", Text = "Menu Keybind", Mode = "Toggle", NoUI = false })
+Library.ToggleKeybind = Options.MenuKeybind
+UIGroup:AddToggle("AutoLoad", { Text = "Auto Load Config", Default = true })
+UIGroup:AddToggle("ShowCoords", { Text = "Show Coordinates", Default = true, Callback = function(v) coordsGui.Enabled = v end })
+UIGroup:AddButton("Unload Script", function() Library:Unload() end)
+
+local ThemeManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/addons/ThemeManager.lua"))()
+local SaveManager  = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/addons/SaveManager.lua"))()
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({"MenuKeybind"})
+ThemeManager:SetFolder("ProjectZero")
+SaveManager:SetFolder("ProjectZero/configs")
+SaveManager:BuildConfigSection(Tabs.Settings)
+ThemeManager:ApplyToTab(Tabs.Settings)
+pcall(function() SaveManager:LoadAutoloadConfig() end)
+
+-- ================ coords overlay ================
+local coordsGui = Instance.new("ScreenGui")
+coordsGui.Name = "ProjectZeroCoords"
+coordsGui.ResetOnSpawn = false
+coordsGui.DisplayOrder = 9998
+coordsGui.IgnoreGuiInset = true
+pcall(function() coordsGui.Parent = game:GetService("CoreGui") end)
+if not coordsGui.Parent then coordsGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local card = Instance.new("Frame")
+card.Size = UDim2.new(0, 216, 0, 124)
+card.Position = UDim2.new(0, 16, 1, -140)
+card.BackgroundColor3 = Color3.fromRGB(14, 16, 22)
+card.BackgroundTransparency = 0.06
+card.BorderSizePixel = 0
+card.Active = true
+card.Parent = coordsGui
+
+local cc = Instance.new("UICorner"); cc.CornerRadius = UDim.new(0, 12); cc.Parent = card
+local cs = Instance.new("UIStroke"); cs.Color = Color3.fromRGB(72, 84, 108); cs.Thickness = 1; cs.Transparency = 0.3; cs.Parent = card
+
+local accent = Instance.new("Frame")
+accent.Size = UDim2.new(1, -32, 0, 2); accent.Position = UDim2.new(0, 16, 0, 0)
+accent.BackgroundColor3 = Color3.fromRGB(120, 200, 255); accent.BorderSizePixel = 0; accent.ZIndex = 2; accent.Parent = card
+local ac = Instance.new("UICorner"); ac.CornerRadius = UDim.new(1, 0); ac.Parent = accent
+local ag = Instance.new("UIGradient")
+ag.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 220, 160)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(110, 180, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 130, 230)),
+})
+ag.Parent = accent
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 26); header.Position = UDim2.new(0, 0, 0, 6)
+header.BackgroundTransparency = 1; header.ZIndex = 2; header.Parent = card
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -40, 1, 0); title.Position = UDim2.new(0, 16, 0, 0)
+title.BackgroundTransparency = 1; title.Text = "POSITION"
+title.TextColor3 = Color3.fromRGB(220, 228, 245)
+title.Font = Enum.Font.GothamBold; title.TextSize = 11
+title.TextXAlignment = Enum.TextXAlignment.Left; title.ZIndex = 2; title.Parent = header
+
+local liveDot = Instance.new("Frame")
+liveDot.Size = UDim2.new(0, 7, 0, 7); liveDot.Position = UDim2.new(1, -24, 0.5, -3)
+liveDot.BackgroundColor3 = Color3.fromRGB(120, 220, 160)
+liveDot.BorderSizePixel = 0; liveDot.ZIndex = 3; liveDot.Parent = header
+local ldc = Instance.new("UICorner"); ldc.CornerRadius = UDim.new(1, 0); ldc.Parent = liveDot
+
+local rowDefs = {
+    { key = "X", color = Color3.fromRGB(255, 105, 120), tint = Color3.fromRGB(46, 20, 26) },
+    { key = "Y", color = Color3.fromRGB(120, 230, 150), tint = Color3.fromRGB(20, 44, 28) },
+    { key = "Z", color = Color3.fromRGB(120, 175, 255), tint = Color3.fromRGB(20, 32, 52) },
+}
+local coordLabels = {}
+for i, def in ipairs(rowDefs) do
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -20, 0, 22); row.Position = UDim2.new(0, 10, 0, 36 + (i - 1) * 26)
+    row.BackgroundColor3 = def.tint; row.BackgroundTransparency = 0.2
+    row.BorderSizePixel = 0; row.ZIndex = 2; row.Parent = card
+    local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0, 7); rc.Parent = row
+    local rs = Instance.new("UIStroke"); rs.Color = def.color; rs.Thickness = 1; rs.Transparency = 0.7; rs.Parent = row
+    local pill = Instance.new("Frame")
+    pill.Size = UDim2.new(0, 3, 0, 12); pill.Position = UDim2.new(0, 8, 0.5, -6)
+    pill.BackgroundColor3 = def.color; pill.BorderSizePixel = 0; pill.ZIndex = 3; pill.Parent = row
+    local pc = Instance.new("UICorner"); pc.CornerRadius = UDim.new(1, 0); pc.Parent = pill
+    local axis = Instance.new("TextLabel")
+    axis.Size = UDim2.new(0, 20, 1, 0); axis.Position = UDim2.new(0, 18, 0, 0)
+    axis.BackgroundTransparency = 1; axis.Text = def.key
+    axis.TextColor3 = def.color; axis.Font = Enum.Font.GothamBold
+    axis.TextSize = 12; axis.TextXAlignment = Enum.TextXAlignment.Left; axis.ZIndex = 3; axis.Parent = row
+    local value = Instance.new("TextLabel")
+    value.Size = UDim2.new(1, -48, 1, 0); value.Position = UDim2.new(0, 44, 0, 0)
+    value.BackgroundTransparency = 1; value.Text = "0.0"
+    value.TextColor3 = Color3.fromRGB(235, 240, 252); value.Font = Enum.Font.Code
+    value.TextSize = 12; value.TextXAlignment = Enum.TextXAlignment.Right; value.ZIndex = 3; value.Parent = row
+    coordLabels[def.key] = value
+end
+
+local dragging, dragStart, startPos = false, nil, nil
+card.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; dragStart = input.Position; startPos = card.Position
+    end
+end)
+card.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        local d = input.Position - dragStart
+        card.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end)
+
+local pulseT = 0
+RunService.Heartbeat:Connect(function(dt)
+    if not coordsGui.Enabled then return end
+    pulseT = pulseT + dt * 2.2
+    local p = (math.sin(pulseT) + 1) * 0.5
+    liveDot.BackgroundColor3 = Color3.fromRGB(math.floor(90+p*50), math.floor(200+p*40), math.floor(130+p*40))
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        coordLabels.X.Text = string.format("%.1f", hrp.Position.X)
+        coordLabels.Y.Text = string.format("%.1f", hrp.Position.Y)
+        coordLabels.Z.Text = string.format("%.1f", hrp.Position.Z)
+    else
+        coordLabels.X.Text = "—"; coordLabels.Y.Text = "—"; coordLabels.Z.Text = "—"
+    end
+end)
+
+-- ================ character tracking ================
+local function onChar(c)
+    char = c
+    hum = c:WaitForChild("Humanoid")
+    root = c:WaitForChild("HumanoidRootPart")
+    if voidSpam.enabled then pcall(startVoidSpam) end
+    if vsHelper.enabled then pcall(startVSHelper) end
+    if orbit.enabled then pcall(startOrbit) end
+    if bait.enabled then pcall(startBait) end
+    if antiBait.enabled then pcall(startAntiBait) end
+    if freezeBait.enabled then pcall(startFreezeBait) end
+    if predict.enabled then pcall(startPredict) end
+    if antiAim.enabled then pcall(startAntiAim) end
+end
+if LocalPlayer.Character then onChar(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(onChar)
+LocalPlayer.CharacterRemoving:Connect(function()
+    pcall(stopVoidSpam); pcall(stopVSHelper); pcall(stopOrbit)
+    pcall(stopBait); pcall(stopAntiBait); pcall(stopFreezeBait); pcall(stopPredict)
+    pcall(stopAntiAim)
+    char, root, hum = nil, nil, nil
+end)
+
+Library:Notify({ Title = "Project Zero", Description = "loaded", Time = 4 })
